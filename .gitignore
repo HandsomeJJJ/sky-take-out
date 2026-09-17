@@ -1,0 +1,19 @@
+# Java / Maven
+target/
+*.class
+*.jar
+*.war
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Local configuration and logs
+.env
+.env.*
+*.log
+logs/
+
+# OS
+.DS_Store

@@ -1,0 +1,33 @@
+spring:
+  kafka:
+    bootstrap-servers: kafka:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+    consumer:
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      auto-offset-reset: earliest
+  rabbitmq:
+    host: rabbitmq
+    port: 5672
+    username: guest
+    password: guest
+
+sky:
+  datasource:
+    host: mysql
+    port: 3306
+    database: sky_take_out
+    username: root
+    password: root
+  redis:
+    host: redis
+    port: 6379
+    password: 123456
+    database: 10
+  messaging:
+    kafka:
+      enabled: true
+    rabbitmq:
+      enabled: true
