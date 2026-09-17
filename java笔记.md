@@ -48,7 +48,10 @@ sky-take-out
 - **sky-common**：常量、异常、工具类、公共配置。
 - **sky-pojo**：Entity、DTO、VO。
 - **sky-server**：Controller、Service、Mapper、配置、启动类。
-- **本质**：Maven 多模块单体项目，不是微服务。
+- **本质**：大项目拆成多个独立子模块，共用父工程统一管理依赖、版本、插件；模块之间可以互相引用，实现代码复用、职责拆分。\*\*
+
+> 结构形式：一个**父工程（pom 类型）** + 多个子 module（jar/pom）
+> 父工程本身不写业务代码，只做管理。
 
 ---
 
@@ -1020,24 +1023,9 @@ Kafka
 - Redis 去重。
 - 数据库唯一索引。
 
-### 本项目落地：订单创建后异步统计
-
-```text
-订单、订单明细、清空购物车（同一事务）
-  ↓ 事务提交成功
-OrderCreatedEvent → Kafka Topic：order.created
-  ↓ 消费组 sky-order-statistics
-Redis：order:statistics:created:{日期}
-```
-
-- 通过 `@TransactionalEventListener` 在**事务提交后**再发 Kafka，避免数据库回滚但统计已增加。
-- 消费端以 `orderId` 写 Redis 去重 Key；Kafka 通常按“至少一次”消费，重复消息不能重复计数。
-- Kafka 适合通知、统计等非核心链路：下单接口不等待统计完成，达到解耦和削峰的效果。
-- 生产环境还要加 Outbox 本地消息表、发送重试和监控，处理“数据库已提交但 Kafka 发送失败”的最终一致性问题。
-
 ---
 
-## 37. RabbitMQ【订单超时取消】
+## 37. RabbitMQ【与 Kafka 二选一】
 
 更适合业务消息和延迟消息。
 
@@ -1054,21 +1042,6 @@ Spring Task 扫描超时订单
 ```
 
 减少周期性数据库扫描。
-
-### 本项目落地：TTL + 死信队列
-
-```text
-订单事务提交成功
-  ↓
-order.delay.exchange → order.delay.queue（TTL：15 分钟）
-  ↓ 死信转发
-order.cancel.exchange → order.cancel.queue → 取消消费者
-```
-
-- 不依赖 RabbitMQ 延迟消息插件，使用队列 TTL 与死信交换机实现延迟。
-- 消费者执行条件更新：`where id = ? and status = 待支付`。消息重复、订单已支付/取消时影响行数为 0，因此不会误取消。
-- RabbitMQ 更适合业务任务、可靠投递和路由；它替代了定时扫描所有超时订单的方式。
-- 生产环境应开启 publisher confirm、消费者手动 ACK、失败重试与死信告警；多种延迟时间且要求精确时可使用延迟插件。
 
 ---
 
@@ -1137,20 +1110,6 @@ LLM 生成回答
 - 锁误删。
 - 可重入。
 
-### 本项目落地：防同一用户重复下单
-
-```text
-SET order:submit:lock:{userId} randomToken NX EX 30
-  ├─ 成功：执行下单事务
-  └─ 失败：返回“订单正在提交，请勿重复操作”
-事务完成：Lua 比较 token 相等才删除锁
-```
-
-- `SET NX EX` 必须原子设置：不能先 `setnx` 再设置过期时间，否则异常会形成死锁。
-- 锁值使用 UUID token，释放时 Lua 原子“比较并删除”，避免锁过期后误删其他请求的新锁。
-- 当前实现让锁持有到事务完成；锁超时时间要大于正常业务耗时。超长业务可使用 Redisson 的看门狗续期。
-- 锁不能取代数据库约束；仍应通过唯一索引、状态机或条件更新兜底。
-
 ---
 
 ## 40. Elasticsearch【中优先级】
@@ -1218,7 +1177,54 @@ Nginx  →
              → Spring Boot 8082
 ```
 
+---
 
+## 43. Spring Boot Actuator【中优先级】
+
+提供：
+
+- 健康检查。
+- Metrics。
+- JVM 信息。
+- Bean 信息。
+
+可结合：
+
+```text
+Prometheus + Grafana
+```
+
+进行监控。
+
+---
+
+## 44. 接口限流【中优先级】
+
+常见实现：
+
+- Redis + Lua。
+- Bucket4j。
+- Sentinel。
+- Nginx `limit_req`。
+
+算法：
+
+- 固定窗口。
+- 滑动窗口。
+- 令牌桶。
+- 漏桶。
+
+---
+
+## 45. OSS / MinIO【中优先级】
+
+用途：
+
+- 菜品图片。
+- 用户头像。
+- 文件上传。
+
+避免将文件直接放在 Spring Boot 本地目录。
 
 ---
 
