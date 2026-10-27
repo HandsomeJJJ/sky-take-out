@@ -18,18 +18,21 @@
 
 | 层 | 技术 | 说明 |
 |---|---|---|
-| 框架 | SpringBoot 2.7.3 | 父工程统一管理依赖版本 |
+| 框架 | SpringBoot 2.7.3 + **Java 17** | 父工程统一管理依赖版本；pom 显式声明 `java.version=17`，产物字节码 major=61 |
 | ORM | MyBatis + PageHelper | XML 动态 SQL + 注解混用 |
 | DB | MySQL 8 + Druid 连接池 | |
 | 缓存 | Redis（StringRedisTemplate / RedisTemplate） | 营业状态、分布式锁、消费去重 |
-| 认证 | JWT（jjwt 0.9.1）+ HandlerInterceptor | 无状态登录 |
+| 认证 | JWT（jjwt **0.12.6**）+ HandlerInterceptor + **Redis 登出黑名单** | 无状态登录，但 logout 能真正让令牌失效 |
 | 消息 | RabbitMQ（AMQP）+ Kafka（spring-kafka） | 延迟取消 / 事件流 |
 | 实时 | WebSocket（@ServerEndpoint） | 来单提醒、催单 |
-| 存储 | 阿里云 OSS | 图片上传 |
+| 存储 | 阿里云 OSS | 图片上传（大小/后缀/文件头三重校验） |
 | 支付 | 微信支付 V3（wechatpay-apache-httpclient） | JSAPI 下单 + 退款 |
 | 文档 | Knife4j（Swagger2） | 分组：管理端 / 用户端 |
-| 报表 | Apache POI | 基于模板导出 Excel |
-| 部署 | Dockerfile + docker-compose | MySQL/Redis/Kafka/RabbitMQ 一键起 |
+| 报表 | Apache POI **5.2.5** | 基于模板导出 Excel |
+| 部署 | Dockerfile + docker-compose + **GitHub Actions** | 一键起栈；CI 断言产物必须是 major=61 |
+| 数据库版本 | **Flyway** | schema 与索引随应用启动自动落地 |
+| 安全 | **BCrypt**（spring-security-crypto） | 员工密码有盐慢哈希 |
+| JSON | **Jackson**（统一 `JsonUtils`） | 已移除 fastjson |
 
 工程结构：**sky-common（工具/常量/异常/属性）→ sky-pojo（entity/dto/vo）→ sky-server（controller/service/mapper/config/task/messaging）**。
 
@@ -384,12 +387,49 @@ MQ 方案是**订单维度**的，下单就投递一条延迟消息，天然**�
 | ~~WebSocket 单机~~ | 已修复 | ✅ Redis Pub/Sub 广播 |
 | ~~支付回调用户身份~~ | 已修复 | ✅ 按 `orderNumber` 查询，不依赖登录态 |
 | ~~菜品查询未缓存~~ | 已修复 | ✅ Spring Cache + Cache Aside + 事务提交后删缓存 |
-| N+1 查询 | 订单明细循环单查 | `where order_id in (...)` 批量查 |
-| 密码 MD5 | 无盐 | BCrypt / MD5 + 随机盐 |
-| 循环依赖 | 配置层面放开 | 重构分层 |
+| ~~N+1 查询~~ | 已修复 | ✅ 用户端与管理端列表都改成 `where order_id in (...)` 批量查 + 内存分组 |
+| ~~密码 MD5~~ | 已修复 | ✅ BCrypt；库里遗留的 32 位 MD5 在首次登录校验通过后就地重写 |
+| ~~金额信任前端~~ | 已修复 | ✅ 请求 DTO 删掉金额字段，服务端按购物车明细重算 |
+| ~~越权（IDOR）~~ | 已修复 | ✅ 订单/地址簿/购物车全部按当前登录用户 id 过滤 |
+| 循环依赖 | 配置层面放开（`allow-circular-references: true`） | 重构分层 + ArchUnit 守边界 |
 | 无库存扣减 | 只有菜品起停售 | 高并发场景加库存 + 乐观锁 |
+| 金额精度 | 营业额统计仍是 `Double` | 全链路 `BigDecimal`；报表按天多次查询改一次区间查询 + group by |
+| 大版本 | Spring Boot 2.7.3 已 EOL | 3.x + jakarta 迁移 + Java 21 虚拟线程 |
 
 **主动说比被问出来强十倍**——说出改进方案，说明你清楚问题在哪。
+
+---
+
+## 6.5 第三批改造（A/B/C，可直接开口背）
+
+**A 档 —— 五个能直接资损的洞**
+
+1. 「我下单最初是 `BeanUtils.copyProperties` 把前端 DTO 拷进订单表，DTO 里就有 `amount`，等于**客户端自己填应付金额**。我把金额字段从 DTO 删掉，改成服务端按购物车明细 Σ(单价×数量)+打包费重算。这个问题的根因不是漏了个校验，而是**反射式属性拷贝会把"字段名一样"这件事当成业务语义**，所以我换成显式赋值。」
+2. 「订单详情、取消、催单、地址簿的查改删都只按 id 查，没有归属校验，遍历 id 就能读到别人的订单和收货地址。修法是**所有 C 端读写都带上 `user_id` 条件**，而且"不存在"和"不属于你"统一回同一个提示，不帮攻击者探测。」
+3. 「管理端取消订单不校验状态，已完成/已取消的单还能再取消并再次退款；而且原来**先退款再改状态、中间没事务**。我改成先做带前置状态的条件更新把订单落成已取消+退款态，再去调微信退款，退款失败只告警不回滚 —— 因为状态重复变更会造成二次退款，而退款缺失可以人工补偿。」
+4. 「支付回调只验签不校验金额：验签只能证明**消息来自微信**，不能证明**金额对得上**，付 1 分的回调照样能把 50 元的单置成已支付。现在比对回调 `amount.total` 与订单应付（同一套元转分口径），并且只接受 `trade_state=SUCCESS`。」
+5. 「报表接口 `while(!begin.equals(end))` 展开日期，只要开始日期晚于结束日期就永不退出，一个参数就能把服务打挂。我把三处统一成一个带校验的日期展开：空值、倒序、跨度超 366 天直接拒绝 —— 而**根因是全项目一处参数校验都没有**，所以顺手补了 Bean Validation。」
+
+**B 档 —— 技术栈其实停在 2022 年**
+
+- 「最有意思的一条：我 pom 里**没写 `java.version`**，Boot 2.7 父工程默认 1.8，所以我 Dockerfile 换成 JDK 17 只是让 Lombok 能编译，**产物实测是 major=52 的 Java 8 字节码**。加上 `java.version=17` 之后实测 major=61，CI 里我专门加了一步断言这个数，防止再退回去。」
+- 「sky-pojo 里把 `jackson-databind` 硬锁在 **2.9.2**，这是 2017 年 `@class` 反序列化 RCE 那一串 CVE 的版本，而且这个 override 会顺着依赖树把整个应用的 Jackson 拉旧。删掉锁、交给 Boot 管理就够了。」
+- 「fastjson 1.2.76 我**直接移除依赖**而不是升到 1.2.83：项目里解析的正是微信回调、MQ 报文这类外部可控内容，与其长期盯 AutoType 的版本号，不如统一到已经是主力的 Jackson。」
+- 「jjwt 0.9.1 换 0.12.6 之后 HS256 强制要求密钥 ≥256bit，`itcast` 这种默认值直接起不来 —— 这是好事：**我把默认值删了**，环境变量缺失就启动失败，而不是静默用一个可被字典穷举的弱密钥。」
+- 「logout 原来是空实现，JWT 无状态、服务端删不掉令牌，2 小时有效期内一直能用。我加了 Redis 黑名单：key 存令牌的 SHA-256（不把仍可用的凭证原样落到 Redis），TTL 取配置的存活时间，拦截器多查一次。」
+
+**C 档 —— 上一批"闭环"其实只走了一半**
+
+- 「本地消息表我原来 `doSend` 一返回就标"已发送"，但 Kafka 的 `send()` 是异步的、Rabbit 也没开 publisher confirm —— 标成功只代表**进了本机缓冲区**。现在 Rabbit 用 `invoke + waitForConfirms`，Kafka 用 `send(...).get(5s)`，拿到 broker 确认才落成功。」
+- 「`listPending` 是普通 select，三个实例扫到同一批就投三遍。我加了 `status=发送中` 的**条件更新做认领**，只有一个实例能抢到；再加一个 5 分钟超时回收，防止持有者进程崩溃后那条消息永远卡在发送中。」
+- 「Rabbit 之前默认 AUTO ack，脏消息抛异常会无限 requeue。改成手动 ack，异常一律 `basicNack(requeue=false)` 落死信队列 —— 死信队列必须接告警，否则只是把堆积换了个地方。」
+- 「traceId 原来只活在 Tomcat 线程的 MDC 里，消息一进 MQ 链路就断了。现在生产端把 traceId 写进消息头，消费端取出来放回 MDC，一次下单从接口到消费者能用同一个 traceId 串起来。」
+- 「仓库里**根本没有建表脚本**，`docker compose up` 起来是个空库，README 还写着"请自行导入表结构"。我按实体和 Mapper 逐列补了 12 张表的 Flyway 迁移，加了 `orders.number` 等唯一索引和 `(status, order_time)` 组合索引；存量库另给一份手工脚本，因为 `CREATE TABLE IF NOT EXISTS` 不会给已有表补索引。」
+- 「测试原来只有三个带 `main` 和 `System.out` 的"假测试"，其中一个把 `@SpringBootTest` 注释掉了却留着 `@Test`，跑 `mvn test` 必然 NPE，所以 CI 只能 `-DskipTests`。现在 28 条断言用例全绿，覆盖算价、越权、回调幂等、先落库再退款、日期守卫、BCrypt、元转分。」
+
+**一句话收尾**
+
+「这批给我的教训是：**"引入了组件"和"把组件的失效场景补上"是两件事**。本地消息表要配认领和送达确认，手动 ack 要配死信和告警，雪花算法要配唯一索引和 workerId 下发，Flyway 要配存量库的 baseline 策略 —— 少一样，可靠性就只是文档上的。」
 
 ---
 
@@ -441,3 +481,8 @@ MQ 方案是**订单维度**的，下单就投递一条延迟消息，天然**�
 ## 9. 关键词速查（临考前扫一遍）
 
 `JWT + 拦截器 + ThreadLocal` · `AOP 反射自动填充` · `AOP + Redis + Lua 限流` · `MDC traceId` · `RestControllerAdvice` · `PageHelper 拦截器改 SQL` · `MyBatis # 与 $` · `@Transactional 五失效` · `Redisson watchdog 续期` · `RabbitMQ TTL + 死信` · `本地消息表 + 补偿重发` · `TransactionalEventListener AFTER_COMMIT` · `Kafka key 分区有序 + SETNX 幂等` · `条件更新幂等 where status=?` · `WebSocket → Redis Pub/Sub 广播` · `微信 V3 二次签名 + 验签解密` · `雪花算法订单号` · `POI 模板导出` · `缓存三兄弟 + Cache Aside` · `N+1 → in 批量查` · `多阶段构建 + healthcheck` · `ConditionalOnProperty 条件装配`
+
+5. **pom 漏写 `java.version` 是静默失败**：Boot 父工程默认 1.8，JDK 17 编译出来的仍是 Java 8 字节码，你完全看不出问题。用 `javap -v | grep "major version"` 量一次才算确认（52=Java 8，61=Java 17），并把这条断言写进 CI。
+6. **`sky-pojo` 里一个 `jackson-databind` 的版本硬锁会传染全应用**：Boot 管理版本只在没有显式 version 时生效，我删掉那行 2.9.2 之后解析到 2.13.3。
+7. **jjwt 升 0.12 不只是换 API**：`Keys.hmacShaKeyFor` 会拒绝长度不足的密钥，所以必须同时删掉 yml 里的弱默认值，否则升级直接变成启动失败。
+8. **`@SpringBootTest` 被注释掉但 `@Test` 留着**，字段全是 null，`mvn test` 会 NPE —— 这也是为什么镜像构建一直 `-DskipTests`：测试从没能真正跑过。
