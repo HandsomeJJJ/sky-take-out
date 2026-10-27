@@ -233,10 +233,19 @@ public class OrderServiceImpl implements OrderService {
         Long userId = BaseContext.getCurrentId();
         User user = userMapper.getById(userId);
 
+        // 以订单实际金额为准，不能用写死的测试金额
+        Orders ordersDB = orderMapper.getByNumberAndUserId(ordersPaymentDTO.getOrderNumber(), userId);
+        if (ordersDB == null) {
+            throw new OrderBusinessException(MessageConstant.ORDER_NOT_FOUND);
+        }
+        if (!Orders.UN_PAID.equals(ordersDB.getPayStatus())) {
+            throw new OrderBusinessException(MessageConstant.ORDER_STATUS_ERROR);
+        }
+
         //调用微信支付接口，生成预支付交易单
         JSONObject jsonObject = weChatPayUtil.pay(
                 ordersPaymentDTO.getOrderNumber(), //商户订单号
-                new BigDecimal(0.01), //支付金额，单位 元
+                ordersDB.getAmount(), //支付金额，单位 元
                 "苍穹外卖订单", //商品描述
                 user.getOpenid() //微信用户的openid
         );
@@ -257,11 +266,17 @@ public class OrderServiceImpl implements OrderService {
      * @param outTradeNo
      */
     public void paySuccess(String outTradeNo) {
-        // 当前登录用户id
-        Long userId = BaseContext.getCurrentId();
+        // 回调由微信服务器发起，没有登录态，只能按订单号查，不能用 BaseContext
+        Orders ordersDB = orderMapper.getByNumber(outTradeNo);
+        if (ordersDB == null) {
+            throw new OrderBusinessException(MessageConstant.ORDER_NOT_FOUND);
+        }
 
-        // 根据订单号查询当前用户的订单
-        Orders ordersDB = orderMapper.getByNumberAndUserId(outTradeNo, userId);
+        // 幂等：微信会重复推送，已支付过的直接返回，避免重复推送来单提醒
+        if (Orders.PAID.equals(ordersDB.getPayStatus())) {
+            log.info("订单已支付，忽略重复回调，outTradeNo={}", outTradeNo);
+            return;
+        }
 
         // 根据订单id更新订单的状态、支付方式、支付状态、结账时间
         Orders orders = Orders.builder()
@@ -367,12 +382,12 @@ public class OrderServiceImpl implements OrderService {
 
         // 订单处于待接单状态下取消，需要进行退款
         if (ordersDB.getStatus().equals(Orders.TO_BE_CONFIRMED)) {
-            //调用微信支付退款接口
+            //调用微信支付退款接口，按订单实际金额退款
             weChatPayUtil.refund(
                     ordersDB.getNumber(), //商户订单号
                     ordersDB.getNumber(), //商户退款单号
-                    new BigDecimal(0.01),//退款金额，单位 元
-                    new BigDecimal(0.01));//原订单金额
+                    ordersDB.getAmount(),//退款金额，单位 元
+                    ordersDB.getAmount());//原订单金额
 
             //支付状态修改为 退款
             orders.setPayStatus(Orders.REFUND);
@@ -520,12 +535,12 @@ public class OrderServiceImpl implements OrderService {
         //支付状态
         Integer payStatus = ordersDB.getPayStatus();
         if (payStatus == Orders.PAID) {
-            //用户已支付，需要退款
+            //用户已支付，需要退款，按订单实际金额退款
             String refund = weChatPayUtil.refund(
                     ordersDB.getNumber(),
                     ordersDB.getNumber(),
-                    new BigDecimal(0.01),
-                    new BigDecimal(0.01));
+                    ordersDB.getAmount(),
+                    ordersDB.getAmount());
             log.info("申请退款：{}", refund);
         }
 
@@ -550,13 +565,13 @@ public class OrderServiceImpl implements OrderService {
 
         //支付状态
         Integer payStatus = ordersDB.getPayStatus();
-        if (payStatus == 1) {
-            //用户已支付，需要退款
+        if (payStatus == Orders.PAID) {
+            //用户已支付，需要退款，按订单实际金额退款
             String refund = weChatPayUtil.refund(
                     ordersDB.getNumber(),
                     ordersDB.getNumber(),
-                    new BigDecimal(0.01),
-                    new BigDecimal(0.01));
+                    ordersDB.getAmount(),
+                    ordersDB.getAmount());
             log.info("申请退款：{}", refund);
         }
 

@@ -7,25 +7,27 @@ sky:
     username: root
     password: root
   alioss:
-    endpoint: oss-cn-beijing.aliyuncs.com
-    access-key-id: your-access-key-id
-    access-key-secret: your-access-key-secret
-    bucket-name: your-bucket-name
+    endpoint: ${ALIOSS_ENDPOINT:oss-cn-beijing.aliyuncs.com}
+    access-key-id: ${ALIOSS_ACCESS_KEY_ID:your-access-key-id}
+    access-key-secret: ${ALIOSS_ACCESS_KEY_SECRET:your-access-key-secret}
+    bucket-name: ${ALIOSS_BUCKET_NAME:your-bucket-name}
   redis:
     host: localhost
     port: 6379
-    password: 123456
+    password: ${REDIS_PASSWORD:123456}
     database: 10
+  # 敏感配置一律走环境变量，禁止明文入库。
+  # 本地调试：export WECHAT_SECRET=xxx WECHAT_API_V3_KEY=xxx ...
   wechat:
-    appid: ***REMOVED***
-    secret: ***REMOVED***
-    mchid : ***REMOVED***
-    mchSerialNo: ***REMOVED***
-    privateKeyFilePath: D:\pay\apiclient_key.pem
-    apiV3Key: ***REMOVED***
-    weChatPayCertFilePath: D:\pay\wechatpay_166D96F876F45C7D07CE98952A96EC980368ACFC.pem
-    notifyUrl: https://***REMOVED***/notify/paySuccess
-    refundNotifyUrl: https://***REMOVED***/notify/refundSuccess
+    appid: ${WECHAT_APPID:your-appid}
+    secret: ${WECHAT_SECRET:your-secret}
+    mchid: ${WECHAT_MCHID:your-mchid}
+    mchSerialNo: ${WECHAT_MCH_SERIAL_NO:your-mch-serial-no}
+    privateKeyFilePath: ${WECHAT_PRIVATE_KEY_PATH:}
+    apiV3Key: ${WECHAT_API_V3_KEY:your-api-v3-key}
+    weChatPayCertFilePath: ${WECHAT_PAY_CERT_PATH:}
+    notifyUrl: ${WECHAT_NOTIFY_URL:https://your-domain/notify/paySuccess}
+    refundNotifyUrl: ${WECHAT_REFUND_NOTIFY_URL:https://your-domain/notify/refundSuccess}
   messaging:
     # 本地默认关闭；启动 Kafka、RabbitMQ 后改为 true。
     kafka:

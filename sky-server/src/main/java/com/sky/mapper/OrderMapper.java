@@ -29,6 +29,12 @@ public interface OrderMapper {
     Orders getByNumberAndUserId(String orderNumber, Long userId);
 
     /**
+     * 仅按订单号查询。支付回调由微信服务器发起，没有登录态，不能带 userId。
+     */
+    @Select("select * from orders where number = #{orderNumber}")
+    Orders getByNumber(String orderNumber);
+
+    /**
      * 修改订单信息
      * @param orders
      */

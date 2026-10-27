@@ -45,4 +45,14 @@ public class GlobalExceptionHandler {
             return Result.error(MessageConstant.UNKNOWN_ERROR);
         }
     }
+
+    /**
+     * 兜底：没有兜底 handler 时，未捕获异常会直接暴露成 500 错误页/堆栈。
+     * 这里统一转成 Result，并保留完整堆栈到日志。
+     */
+    @ExceptionHandler(Exception.class)
+    public Result exceptionHandler(Exception ex){
+        log.error("未处理异常：", ex);
+        return Result.error(MessageConstant.UNKNOWN_ERROR);
+    }
 }
