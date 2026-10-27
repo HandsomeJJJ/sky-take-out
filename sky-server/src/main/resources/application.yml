@@ -27,6 +27,9 @@ mybatis:
     map-underscore-to-camel-case: true
 
 logging:
+  pattern:
+    # 日志带 traceId（来自 MDC），一次请求的日志可被同一条 traceId 串起来
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%X{traceId:-}] [%thread] %-5level %logger{36} - %msg%n"
   level:
     com:
       sky:

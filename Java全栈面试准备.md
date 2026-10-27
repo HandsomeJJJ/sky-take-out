@@ -175,6 +175,19 @@
 - **容器网络**：同一 compose 网络内**直接用服务名互访**（`mysql`、`redis`、`kafka`、`rabbitmq`），`application-docker.yml` 里就是写服务名而非 localhost。
 - **非 root 运行 + 时区**：镜像内建 `appuser` 运行，`TZ=Asia/Shanghai` 保证 `LocalDateTime.now()` 是北京时间。
 
+### 3.18 接口限流（AOP + Redis）
+
+- 自定义 `@RateLimit(limit, window, key)` 注解 + `RateLimitAspect` 切面。
+- 用 **Lua 脚本**执行 `INCR` + 首次 `EXPIRE`，**保证原子**（两条命令拆开写，进程在中间挂了 key 就永不过期）。
+- 按 `用户维度` 计数（key = `rate:limit:{方法}:{userId}`），触发则抛 `RateLimitException`，全局异常统一返回"请求过于频繁"。
+- 应用在**下单（10s/5 次）**和**催单（10s/3 次）**两个最容易被刷的接口。
+
+### 3.19 链路追踪 traceId（MDC）
+
+- `TraceIdFilter` 在请求最前面生成/透传 `traceId` 并 `MDC.put`，响应头回传 `X-Trace-Id`，`finally` 里 `MDC.clear()`。
+- 日志 pattern 加 `%X{traceId}`，**一次请求的所有日志共用同一个 traceId**。
+- 价值：线上排障时 `grep 一个 traceId` 就能还原整条调用链，不用靠时间戳猜。
+
 ---
 
 ## 4. 高频追问 · 标准回答
@@ -280,7 +293,7 @@ MQ 方案是**订单维度**的，下单就投递一条延迟消息，天然**�
 
 ### Q16：订单列表有没有 N+1 问题？
 
-「有。`pageQuery4User` 是先分页查订单，再**循环里逐条查订单明细**。订单数固定（比如 10 条/页）时可控，但更好的做法是**一次 `where order_id in (...)` 批量查出来再内存分组**，或者直接在 SQL 里 join 后用 `resultMap` 的 `collection` 映射。」
+「原来有——先分页查订单，再**循环里逐条查订单明细**，10 条就是 1+10 次查询。我已经改成**一次 `where order_id in (...)` 批量查出来，再 `stream().groupingBy(orderId)` 内存分组**，从 N+1 降到 2 次查询。更进一步可以 SQL join 后用 `resultMap` 的 `collection` 一次查完，但要注意分页下 join 会让 count 变复杂。」
 
 ### Q17：缓存穿透 / 击穿 / 雪崩？
 
@@ -328,6 +341,23 @@ MQ 方案是**订单维度**的，下单就投递一条延迟消息，天然**�
 
 「同一 compose 网络里的容器**直接用服务名当主机名**访问，不用 IP。比如 `application-docker.yml` 里 MySQL 写 `host: mysql`、Redis 写 `host: redis`，RabbitMQ 写 `host: rabbitmq`——因为 compose 会建一个默认网络，并给每个服务做 DNS 解析。而宿主机/本地开发才用 `localhost`，所以我分了 `dev` 和 `docker` 两个 profile 用不同的地址。」
 
+### Q27：限流怎么实现的？几种算法？
+
+「我用的是 **AOP 切面 + Redis 固定窗口**：自定义 `@RateLimit` 注解，切面里用 **Lua 脚本**执行 `INCR + 首次 EXPIRE`，保证原子；按用户维度计数，超了就抛异常统一返回"请求过于频繁"。四种算法我清楚取舍：
+
+| 算法 | 原理 | 缺点 |
+|---|---|---|
+| 计数器（固定窗口） | 窗口内计数 | **临界突刺**：窗口边界两秒可能放行 2 倍流量 |
+| 滑动窗口 | 把窗口再切分/记录时间戳 | 更平滑，但内存占用更高 |
+| 漏桶 | 固定速率流出 | 强制匀速，突发会被削平 |
+| 令牌桶 | 固定速率放令牌，攒桶应对突发 | **最常用**，允许一定突发 |
+
+生产上我推荐**令牌桶（Guava RateLimiter / Redis+Lua）或网关层 Sentinel**，单机用 Guava 就够，分布式用 Redis。」
+
+### Q28：线上出问题怎么快速定位？
+
+「靠 **traceId**。我在请求最前面的 `Filter` 里给每个请求生成/透传 traceId 写进 `MDC`，日志 pattern 带 `%X{traceId}`，响应头也回传 `X-Trace-Id`。所以一条请求从进来到 Controller、Service、Mapper 的所有日志都带同一个 traceId，**grep 一个 traceId 就能还原整条调用链**。再配合 `X-Trace-Id` 头，前端把 traceId 反馈回来，就能定位到具体那次请求。MDC 用完必须 `finally` 里 clear，否则线程池复用会串号。」
+
 ---
 
 ## 5. MQ 改造 · 我做的亮点（主动抛出来加分）
@@ -365,12 +395,49 @@ MQ 方案是**订单维度**的，下单就投递一条延迟消息，天然**�
 
 ## 7. 踩过的坑（真实，可聊）
 
-1. **Lombok 1.18.20 在 JDK 17/25 下注解处理器失效**，编译报"找不到符号 getXxx()"（其实 `@Data` 根本没生成 getter）。解决：**升到 1.18.30**，并确保 Maven 跑在 **JDK 17** 上（本机默认 JDK 25 也会挂）。
+1. **Lombok 1.18.20 在 JDK 17/25 下注解处理器失效**，编译报"找不到符号 getXxx()"（其实 `@Data` 根本没生成 getter）。解决：**升到 1.18.30**，并确保 Maven 跑在 **JDK 17** 上（本机默认 JDK 25 也会挂）。同样的坑还出现在 Dockerfile 里——原来写 JDK 8，升完 Lombok 后 docker 构建会失败，得同步改成 JDK 17。
 2. **Spring 事件默认是同步的**，在事务内直接 publish 会导致"**事务还没提交，消费者已经查不到订单**"。解决：用 `@TransactionalEventListener`（默认 `AFTER_COMMIT`）。
 3. **重复下单**：只靠前端防抖没用，后端必须加**分布式锁 + 状态机校验**。
+4. **序列化不开启 default typing**：`new GenericJackson2JsonRedisSerializer(自定义 ObjectMapper)` 反序列化回来是 `LinkedHashMap`，必须手动 `activateDefaultTyping`。
 
 ---
 
-## 8. 关键词速查（临考前扫一遍）
+## 8. 场景深挖：面试官就着项目往下追问
 
-`JWT + 拦截器 + ThreadLocal` · `AOP 反射自动填充` · `RestControllerAdvice` · `PageHelper 拦截器改 SQL` · `MyBatis # 与 $` · `@Transactional 五失效` · `Redis SET NX EX + Lua 解锁` · `RabbitMQ TTL + 死信` · `TransactionalEventListener AFTER_COMMIT` · `Kafka key 分区有序 + SETNX 幂等` · `条件更新幂等 where status=?` · `WebSocket 单机 Map → Redis 广播` · `微信 V3 二次签名 + AES 解密` · `POI 模板导出` · `缓存三兄弟` · `循环依赖三级缓存` · `ConditionalOnProperty 条件装配`
+### 场景 1：把完整下单链路串起来讲
+
+「用户点下单 → 拦截器校验 JWT 拿到 userId → Service 先加 **Redisson 锁**防重复提交 → 校验地址/购物车 → 一个**事务**里插订单、插明细、清购物车、写两条 **mq_message** → 事务提交后 `@TransactionalEventListener` 触发立即发送 → 失败由**补偿任务**重发 → RabbitMQ 延迟队列 15 分钟转死信**取消未支付订单**、Kafka 异步统计 → 用户支付 → 微信回调**验签 + 解密** → 改订单状态（幂等）→ **Redis Pub/Sub 广播**来单提醒 → 管理端 WebSocket 弹窗。整个链路里，锁管重复、事务管一致、消息表管可靠、验签管安全、幂等管重复推送。」
+
+### 场景 2：订单量暴增，哪里先扛不住？
+
+「三处：① **DB**——超时取消原来每分钟扫表（已改 MQ），剩下的压力是分页查询和报表统计，报表现在还是循环查 30 次；② **Redis**——缓存、锁、限流、去重都靠它，是单点，生产要主从 + 哨兵/集群；③ **消息堆积**——消费慢会堆积，要监控 lag 并扩容消费者。入口再加**限流削峰**（我加了 AOP 限流在下单/催单）。」
+
+### 场景 3：Redis 挂了怎么办？
+
+「分场景答：**营业状态/菜品缓存** → 降级直接查库，会慢但不挂；**分布式锁** → Redisson 拿不到锁，下单失败——**下单失败好过重复下单**；**限流** → 失效能本地兜底。根上 Redis 必须主从 + 哨兵/集群，不能单点。」
+
+### 场景 4：MQ 挂了怎么办？
+
+「这正是**本地消息表**的价值：消息已经落库，MQ 恢复后补偿任务继续重发，**不会丢**；超时取消还有 `OrderTimeoutFallbackTask` 兜底。所以 MQ 挂只会**延迟**，不会**丢消息**、不会**错状态**。」
+
+### 场景 5：改了菜品价格，用户看到旧价怎么办（缓存一致性）
+
+「我用 **Cache Aside**：更新 DB 后**删缓存**，下次读回源。两个边界：**删缓存失败** → 延迟双删 / 重试补偿；**更新和删除之间读到旧值** → 短暂不一致，一般业务可接受，强一致才上读写锁或版本号。我的删缓存挂在**事务提交后**，先保证 DB 正确，再让缓存失效。」
+
+### 场景 6：分布式锁什么场景会失效？
+
+「① **锁过期**（业务超时）→ Redisson watchdog 续期解决；② **主从切换**（主挂了锁没同步到从）→ 极端用红锁 RedLock，但红锁有争议，别乱用；③ **锁被误删** → 靠持有者校验防误删。核心结论：**锁只保证互斥，最终正确性靠状态机幂等兜底**。」
+
+### 场景 7：你怎么验证这些改动？
+
+「不会"看代码觉得对"。① `mvn compile`（JDK 17）验证编译；② 序列化器写**往返测试**（反射调用真实配置，验证 LocalDateTime、空列表、嵌套对象）；③ `docker compose config` 校验编排语法；④ 微信验签用 `javap` 核对 SDK 类签名再写。面试官要的是**验证意识**，不是"我觉得能跑"。」
+
+### 场景 8：项目里最难的 bug
+
+「**Lombok 1.18.20 在 JDK 17 下注解处理器失效**：编译报"找不到符号 getXxx"，看着像业务代码问题，实际是 `@Data` 根本没生成 getter。定位关键是"这个类明明加了 `@Data` 却找不到 getter"——排除法锁定工具链版本，升 Lombok + 统一 JDK 17 解决。这个 bug 教会我：**报错位置不一定是根因**。」
+
+---
+
+## 9. 关键词速查（临考前扫一遍）
+
+`JWT + 拦截器 + ThreadLocal` · `AOP 反射自动填充` · `AOP + Redis + Lua 限流` · `MDC traceId` · `RestControllerAdvice` · `PageHelper 拦截器改 SQL` · `MyBatis # 与 $` · `@Transactional 五失效` · `Redisson watchdog 续期` · `RabbitMQ TTL + 死信` · `本地消息表 + 补偿重发` · `TransactionalEventListener AFTER_COMMIT` · `Kafka key 分区有序 + SETNX 幂等` · `条件更新幂等 where status=?` · `WebSocket → Redis Pub/Sub 广播` · `微信 V3 二次签名 + 验签解密` · `雪花算法订单号` · `POI 模板导出` · `缓存三兄弟 + Cache Aside` · `N+1 → in 批量查` · `多阶段构建 + healthcheck` · `ConditionalOnProperty 条件装配`

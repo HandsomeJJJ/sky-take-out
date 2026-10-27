@@ -41,6 +41,7 @@ import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -349,16 +350,15 @@ public class OrderServiceImpl implements OrderService {
 
         // 查询出订单明细，并封装入OrderVO进行响应
         if (page != null && page.getTotal() > 0) {
+            // 批量查询所有订单的明细并分组，避免在分页结果上循环单查（N+1）
+            List<Long> orderIds = page.getResult().stream().map(Orders::getId).collect(Collectors.toList());
+            Map<Long, List<OrderDetail>> detailMap = orderDetailMapper.getByOrderIds(orderIds)
+                    .stream().collect(Collectors.groupingBy(OrderDetail::getOrderId));
+
             for (Orders orders : page) {
-                Long orderId = orders.getId();// 订单id
-
-                // 查询订单明细
-                List<OrderDetail> orderDetails = orderDetailMapper.getByOrderId(orderId);
-
                 OrderVO orderVO = new OrderVO();
                 BeanUtils.copyProperties(orders, orderVO);
-                orderVO.setOrderDetailList(orderDetails);
-
+                orderVO.setOrderDetailList(detailMap.getOrDefault(orders.getId(), Collections.emptyList()));
                 list.add(orderVO);
             }
         }

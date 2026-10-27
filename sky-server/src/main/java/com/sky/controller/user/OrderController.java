@@ -1,5 +1,6 @@
 package com.sky.controller.user;
 
+import com.sky.annotation.RateLimit;
 import com.sky.dto.OrdersPaymentDTO;
 import com.sky.dto.OrdersSubmitDTO;
 import com.sky.result.PageResult;
@@ -30,6 +31,7 @@ public class OrderController {
      */
     @PostMapping("/submit")
     @ApiOperation("用户下单")
+    @RateLimit(limit = 5, window = 10, key = "orderSubmit") // 10秒最多5次下单，防刷
     public Result<OrderSubmitVO> submit(@RequestBody OrdersSubmitDTO ordersSubmitDTO){
         log.info("用户下单，参数为：{}",ordersSubmitDTO);
         OrderSubmitVO orderSubmitVO = orderService.submitOrder(ordersSubmitDTO);
@@ -111,6 +113,7 @@ public class OrderController {
      */
     @GetMapping("/reminder/{id}")
     @ApiOperation("客户催单")
+    @RateLimit(limit = 3, window = 10, key = "orderReminder") // 10秒最多催3次，防恶意催单
     public Result reminder(@PathVariable("id") Long id){
         orderService.reminder(id);
         return Result.success();
