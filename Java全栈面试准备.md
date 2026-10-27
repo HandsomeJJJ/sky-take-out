@@ -83,6 +83,15 @@
 
 - 管理端 `PUT /admin/shop/{status}` 写 `SHOP_STATUS`；用户端 `GET /user/shop/status` 读，**不落库**，高频读直接走 Redis。
 
+### 3.6.1 菜品/套餐缓存（Spring Cache）
+
+- 三个缓存：`dishCache`（按分类）、`setmealCache`（按分类）、`setmealDishCache`（套餐内菜品）。
+- 读：`@Cacheable(cacheNames="dishCache", key="#categoryId")`，**空列表也缓存**，防穿透。
+- 写：**先更新 DB 再删缓存**（Cache Aside），起停售菜品时**连带清套餐缓存**（停售菜品会级联停售套餐）。
+- `CacheManager` 用 **`TransactionAwareCacheManagerProxy`** 包装：删缓存延迟到**事务提交后**，避免"事务未提交先删缓存 → 并发读回填旧值"。
+- 序列化：**JSON + 手动 default typing**（不开启的话反序列化回来是 `LinkedHashMap`），并用 `BasicPolymorphicTypeValidator` 限定反序列化包，防 RCE。
+- 统一 **TTL 60 分钟**；value 不用 JDK 序列化（有反序列化漏洞风险）。
+
 ### 3.7 菜品 / 套餐 / 分类
 
 - 新增菜品：菜品表 1 条 + 口味表 n 条，**`@Transactional`** 保证原子；主键靠 `useGeneratedKeys` 回显。
@@ -263,7 +272,7 @@ MQ 方案是**订单维度**的，下单就投递一条延迟消息，天然**�
 - **穿透**：查不存在的 key → 布隆过滤器，或缓存空值 + 短 TTL。
 - **击穿**：热点 key 过期瞬间大量请求打到 DB → **互斥锁（Redis SETNX）重建**，或逻辑过期。
 - **雪崩**：大批 key 同时过期 → **TTL 加随机值**打散。
-- 本项目 Redis 主要用于营业状态、分布式锁、消费去重，**菜品/套餐查询目前没加缓存**（`@EnableCaching` 已开启但还没落 `@Cacheable`）——这是后续优化点，加了就要处理**缓存与数据库一致性**（更新时删缓存 + 延迟双删）。
+- 本项目 Redis 用途：营业状态、分布式锁、消费去重、**菜品/套餐缓存**。缓存这块用的是 **Cache Aside + 事务提交后删缓存**（`TransactionAwareCacheManagerProxy`），写操作一律**删缓存而不是更新缓存**。后续可补：**TTL 随机值**打散、**延迟双删**、热点 key 用**逻辑过期**避免击穿。
 
 ### Q18：接口幂等怎么设计？
 
@@ -313,7 +322,7 @@ MQ 方案是**订单维度**的，下单就投递一条延迟消息，天然**�
 | 订单号重复 | `System.currentTimeMillis()` | 雪花算法 / Redis INCR |
 | WebSocket 单机 | session 存静态 Map | Redis Pub/Sub 或 MQ 广播 |
 | 支付回调用户身份 | `paySuccess` 依赖 `BaseContext`，但回调来自微信服务器**无 token**，ThreadLocal 取不到 | 回调接口不依赖登录态，直接按 `out_trade_no` 处理 |
-| 菜品查询未缓存 | 每次都查库 | 加 Redis 缓存 + 删除缓存策略 |
+| ~~菜品查询未缓存~~ | 已修复 | ✅ Spring Cache + Cache Aside + 事务提交后删缓存 |
 | N+1 查询 | 订单明细循环单查 | `where order_id in (...)` 批量查 |
 | 密码 MD5 | 无盐 | BCrypt / MD5 + 随机盐 |
 | 循环依赖 | 配置层面放开 | 重构分层 |

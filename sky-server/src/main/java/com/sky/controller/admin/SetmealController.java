@@ -62,7 +62,7 @@ public class SetmealController {
      */
     @DeleteMapping
     @ApiOperation("批量删除套餐")
-    @CacheEvict(cacheNames = "setmealCache",allEntries = true)
+    @CacheEvict(cacheNames = {"setmealCache", "setmealDishCache"}, allEntries = true)
     public Result delete(@RequestParam List<Long> ids) {
         setmealService.deleteBatch(ids);
         return Result.success();
@@ -89,7 +89,8 @@ public class SetmealController {
      */
     @PutMapping
     @ApiOperation("修改套餐")
-    @CacheEvict(cacheNames = "setmealCache",allEntries = true)
+    // 套餐内菜品可能变化，套餐详情缓存也要清
+    @CacheEvict(cacheNames = {"setmealCache", "setmealDishCache"}, allEntries = true)
     public Result update(@RequestBody SetmealDTO setmealDTO) {
         setmealService.update(setmealDTO);
         return Result.success();
