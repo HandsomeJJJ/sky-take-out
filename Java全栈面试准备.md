@@ -161,7 +161,19 @@
 
 - 分页：`PageHelper.startPage(page, pageSize)`，**只对紧随其后的第一条 SQL 生效**，靠 ThreadLocal 传分页参数。
 - 接口文档：Knife4j 分两组 Docket，扫 admin / user 两个包。
-- 部署：`docker-compose` 起 MySQL、Redis、Kafka（KRaft 模式）、RabbitMQ、应用；应用走 `docker` profile，**依赖服务 healthcheck 通过才启动**。
+
+### 3.17 Docker 部署（一条命令起全栈）
+
+- **Dockerfile 多阶段构建**：
+  - `builder` 阶段用 `maven:3.9.9-eclipse-temurin-17` 编译打包；
+  - `runtime` 阶段只保留 `eclipse-temurin:17-jre` + Jar，**镜像体积从几百 MB 缩到 ~200MB**；
+  - 先 `COPY pom.xml` 再 `dependency:go-offline`，**利用层缓存**——依赖没变就不重新下载。
+- **为什么 JDK 17 而不是 8**：Lombok 1.18.30 的注解处理器在 JDK 8 下编译会失效（报"找不到符号 getXxx"），且 JDK 8 已停止免费维护。
+- **健康检查**：引入 **Spring Boot Actuator**，暴露 `/actuator/health`；容器 `healthcheck` 用 `curl -sf` 打这个端点，`status=UP` 返回 200、`DOWN` 返回 503。
+- **启动顺序**：`depends_on` + `condition: service_healthy`，**等 MySQL/Redis/Kafka/RabbitMQ 健康了应用才启动**（普通 `depends_on` 只等"容器起来"，不等"服务就绪"）。
+- **数据卷**：`mysql-data`/`redis-data`/`kafka-data`/`rabbitmq-data` 用命名卷，**容器删了数据还在**；`mq_message.sql` 挂到 MySQL 的 `/docker-entrypoint-initdb.d` 首次初始化自动建表。
+- **容器网络**：同一 compose 网络内**直接用服务名互访**（`mysql`、`redis`、`kafka`、`rabbitmq`），`application-docker.yml` 里就是写服务名而非 localhost。
+- **非 root 运行 + 时区**：镜像内建 `appuser` 运行，`TZ=Asia/Shanghai` 保证 `LocalDateTime.now()` 是北京时间。
 
 ---
 
@@ -299,6 +311,22 @@ MQ 方案是**订单维度**的，下单就投递一条延迟消息，天然**�
 ### Q22：SpringBoot 自动配置原理？
 
 「`@SpringBootApplication` 里的 `@EnableAutoConfiguration` → 加载 `META-INF/spring.factories`（2.7 也开始支持 `AutoConfiguration.imports`）里的配置类 → 靠 `@ConditionalOnXxx`（`@ConditionalOnClass`、`@ConditionalOnMissingBean`、`@ConditionalOnProperty`）**按条件决定是否装配** → 用户自己定义的 Bean 优先（`@ConditionalOnMissingBean`）。我项目里 MQ 的开关 `@ConditionalOnProperty` 就是这个机制的实际应用。」
+
+### Q23：Dockerfile 多阶段构建有什么用？
+
+「两个好处：**减小镜像体积** + **分离构建和运行环境**。第一阶段用带 Maven、JDK、源码的 `builder` 镜像编译打包；第二阶段只 COPY 编译好的 Jar，用只带 JRE 的镜像运行。构建工具、源码、编译中间产物**都不进最终镜像**，镜像从几百 MB 缩到 200MB 左右。另外第一阶段**先 COPY pom 再 go-offline**，能吃到 Docker 层缓存——依赖没变时重复构建不用重新下载依赖。」
+
+### Q24：`depends_on` 和 `condition: service_healthy` 有什么区别？
+
+「`depends_on` 只保证**容器启动顺序**，但容器起来 ≠ 服务就绪——MySQL 容器启动了可能还在初始化，此时应用连库必失败。`condition: service_healthy` 配合容器的 `healthcheck`，会**等到依赖服务真正健康**（MySQL 能 `mysqladmin ping` 通、Redis 能 `ping` 通 PONG）才启动应用，解决启动竞态。我用的是后者。」
+
+### Q25：数据卷和 bind mount 区别？你的项目怎么用的？
+
+「**bind mount** 把宿主机目录挂进容器（我挂 `mq_message.sql` 到 MySQL 初始化目录，就是这个）；**数据卷（volume）** 由 Docker 管理、存在宿主机的 `/var/lib/docker/volumes` 下，**删容器数据还在**，跨容器共享和备份更方便。我的 MySQL/Redis/Kafka/RabbitMQ 数据都用命名卷，重启、重建容器都不丢数据。」
+
+### Q26：容器之间怎么互相访问？
+
+「同一 compose 网络里的容器**直接用服务名当主机名**访问，不用 IP。比如 `application-docker.yml` 里 MySQL 写 `host: mysql`、Redis 写 `host: redis`，RabbitMQ 写 `host: rabbitmq`——因为 compose 会建一个默认网络，并给每个服务做 DNS 解析。而宿主机/本地开发才用 `localhost`，所以我分了 `dev` 和 `docker` 两个 profile 用不同的地址。」
 
 ---
 

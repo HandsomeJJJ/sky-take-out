@@ -34,6 +34,16 @@ logging:
         service: info
         controller: info
 
+# Actuator：暴露 health/info 供 docker healthcheck 与监控使用
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+
 sky:
   jwt:
     # 签名密钥走环境变量：密钥泄露 = 任何人都能伪造 token

@@ -40,6 +40,12 @@
             <scope>compile</scope>
         </dependency>
 
+        <!-- Actuator：健康检查与监控端点，供 docker healthcheck 使用 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>mysql</groupId>
             <artifactId>mysql-connector-java</artifactId>
