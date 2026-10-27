@@ -15,15 +15,17 @@ import com.sky.exception.ShoppingCartBusinessException;
 import com.sky.event.OrderCreatedEvent;
 import com.sky.lock.RedisLock;
 import com.sky.mapper.*;
+import com.sky.messaging.MqMessageSender;
 import com.sky.result.PageResult;
 import com.sky.service.OrderService;
 import com.sky.utils.HttpClientUtil;
+import com.sky.utils.SnowflakeIdGenerator;
 import com.sky.utils.WeChatPayUtil;
 import com.sky.vo.OrderPaymentVO;
 import com.sky.vo.OrderStatisticsVO;
 import com.sky.vo.OrderSubmitVO;
 import com.sky.vo.OrderVO;
-import com.sky.websocket.WebSocketServer;
+import com.sky.websocket.WebSocketMessagePublisher;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -61,11 +63,13 @@ public class OrderServiceImpl implements OrderService {
     @Autowired
     private WeChatPayUtil weChatPayUtil;
     @Autowired
-    private WebSocketServer webSocketServer;
+    private WebSocketMessagePublisher webSocketMessagePublisher;
     @Autowired
     private RedisLock redisLock;
     @Autowired
     private ApplicationEventPublisher applicationEventPublisher;
+    @Autowired
+    private MqMessageMapper mqMessageMapper;
 
     /**
      * 用户下单
@@ -77,15 +81,15 @@ public class OrderServiceImpl implements OrderService {
 
         Long userId = BaseContext.getCurrentId();
         String lockKey = "order:submit:lock:" + userId;
-        String lockToken = redisLock.tryLock(lockKey, Duration.ofSeconds(30));
-        if (lockToken == null) {
+        // Redisson 锁：watchdog 自动续期，业务执行多久锁就持有多久，不会提前失效
+        if (!redisLock.tryLock(lockKey, Duration.ofSeconds(1))) {
             throw new OrderBusinessException("订单正在提交，请勿重复操作");
         }
         // 锁持有到事务完成，避免在数据库提交前被下一次重复请求获取。
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronizationAdapter() {
             @Override
             public void afterCompletion(int status) {
-                redisLock.unlock(lockKey, lockToken);
+                redisLock.unlock(lockKey);
             }
         });
 
@@ -115,7 +119,7 @@ public class OrderServiceImpl implements OrderService {
         orders.setOrderTime(LocalDateTime.now());
         orders.setPayStatus(Orders.UN_PAID);
         orders.setStatus(Orders.PENDING_PAYMENT);
-        orders.setNumber(String.valueOf(System.currentTimeMillis()));
+        orders.setNumber(String.valueOf(SnowflakeIdGenerator.getInstance().nextId()));
         orders.setAddress(addressBook.getDetail());
         orders.setPhone(addressBook.getPhone());
         orders.setConsignee(addressBook.getConsignee());
@@ -145,9 +149,33 @@ public class OrderServiceImpl implements OrderService {
                 .orderAmount(orders.getAmount())
                 .build();
 
-        // 事件由事务提交后的监听器再投递给 Kafka / RabbitMQ。
-        applicationEventPublisher.publishEvent(new OrderCreatedEvent(orders.getId(), orders.getNumber(),
-                userId, orders.getAmount(), orders.getOrderTime()));
+        // 事件由事务提交后的监听器触发立即发送；消息本体已在事务内写入 mq_message 表，
+        // 即使这里投递失败，也会被补偿任务重发，保证"业务成功则消息必达"。
+        OrderCreatedEvent event = new OrderCreatedEvent(orders.getId(), orders.getNumber(),
+                userId, orders.getAmount(), orders.getOrderTime());
+        String payload = JSON.toJSONString(event);
+        LocalDateTime now = LocalDateTime.now();
+        mqMessageMapper.insert(MqMessage.builder()
+                .bizType(MqMessageSender.BIZ_ORDER_TIMEOUT)
+                .bizId(String.valueOf(orders.getId()))
+                .payload(payload)
+                .status(MqMessage.PENDING)
+                .retryCount(0)
+                .nextRetryTime(now)
+                .createTime(now)
+                .updateTime(now)
+                .build());
+        mqMessageMapper.insert(MqMessage.builder()
+                .bizType(MqMessageSender.BIZ_ORDER_STATS)
+                .bizId(String.valueOf(orders.getId()))
+                .payload(payload)
+                .status(MqMessage.PENDING)
+                .retryCount(0)
+                .nextRetryTime(now)
+                .createTime(now)
+                .updateTime(now)
+                .build());
+        applicationEventPublisher.publishEvent(event);
 
         return orderSubmitVO;
     }
@@ -295,7 +323,7 @@ public class OrderServiceImpl implements OrderService {
         map.put("content","订单号：" + outTradeNo);
 
         String json = JSON.toJSONString(map);
-        webSocketServer.sendToAllClient(json);
+        webSocketMessagePublisher.broadcast(json);
     }
 
     /**
@@ -505,17 +533,16 @@ public class OrderServiceImpl implements OrderService {
     }
 
     /**
-     * 接单
+     * 接单：待接单(2) -> 已接单(3)。带前置状态的条件更新，避免并发重复接单。
      *
      * @param ordersConfirmDTO
      */
     public void confirm(OrdersConfirmDTO ordersConfirmDTO) {
-        Orders orders = Orders.builder()
-                .id(ordersConfirmDTO.getId())
-                .status(Orders.CONFIRMED)
-                .build();
-
-        orderMapper.update(orders);
+        int rows = orderMapper.updateStatus(ordersConfirmDTO.getId(),
+                Orders.TO_BE_CONFIRMED, Orders.CONFIRMED);
+        if (rows != 1) {
+            throw new OrderBusinessException(MessageConstant.ORDER_STATUS_ERROR);
+        }
     }
 
     /**
@@ -585,48 +612,28 @@ public class OrderServiceImpl implements OrderService {
     }
 
     /**
-     * 派送订单
+     * 派送订单：已接单(3) -> 派送中(4)。带前置状态的条件更新，避免并发重复派送。
      *
      * @param id
      */
     public void delivery(Long id) {
-        // 根据id查询订单
-        Orders ordersDB = orderMapper.getById(id);
-
-        // 校验订单是否存在，并且状态为3
-        if (ordersDB == null || !ordersDB.getStatus().equals(Orders.CONFIRMED)) {
+        int rows = orderMapper.updateStatus(id, Orders.CONFIRMED, Orders.DELIVERY_IN_PROGRESS);
+        if (rows != 1) {
             throw new OrderBusinessException(MessageConstant.ORDER_STATUS_ERROR);
         }
-
-        Orders orders = new Orders();
-        orders.setId(ordersDB.getId());
-        // 更新订单状态,状态转为派送中
-        orders.setStatus(Orders.DELIVERY_IN_PROGRESS);
-
-        orderMapper.update(orders);
     }
 
     /**
-     * 完成订单
+     * 完成订单：派送中(4) -> 已完成(5)。带前置状态的条件更新，避免并发重复完成。
      *
      * @param id
      */
     public void complete(Long id) {
-        // 根据id查询订单
-        Orders ordersDB = orderMapper.getById(id);
-
-        // 校验订单是否存在，并且状态为4
-        if (ordersDB == null || !ordersDB.getStatus().equals(Orders.DELIVERY_IN_PROGRESS)) {
+        int rows = orderMapper.completeByIdAndExpectedStatus(id,
+                Orders.DELIVERY_IN_PROGRESS, Orders.COMPLETED, LocalDateTime.now());
+        if (rows != 1) {
             throw new OrderBusinessException(MessageConstant.ORDER_STATUS_ERROR);
         }
-
-        Orders orders = new Orders();
-        orders.setId(ordersDB.getId());
-        // 更新订单状态,状态转为完成
-        orders.setStatus(Orders.COMPLETED);
-        orders.setDeliveryTime(LocalDateTime.now());
-
-        orderMapper.update(orders);
     }
 
     /**
@@ -648,6 +655,6 @@ public class OrderServiceImpl implements OrderService {
         map.put("content","订单号：" + ordersDB.getNumber());
 
         //通过websocket向客户端浏览器推送消息
-        webSocketServer.sendToAllClient(JSON.toJSONString(map));
+        webSocketMessagePublisher.broadcast(JSON.toJSONString(map));
     }
 }

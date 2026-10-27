@@ -106,11 +106,11 @@
 
 ### 3.9 下单（最容易深挖）
 
-1. **Redis 分布式锁** `order:submit:lock:{userId}`，防重复提交。
+1. **Redisson 分布式锁** `order:submit:lock:{userId}`，防重复提交（watchdog 自动续期 + 可重入）。
 2. 校验地址簿、购物车非空。
-3. 插订单表 1 条（状态 1 待付款 / 支付状态未支付）→ 插订单明细 n 条 → **清空购物车**，整体 `@Transactional`。
-4. 发布 **`OrderCreatedEvent`**（Spring 事件）。
-5. 用 `@TransactionalEventListener` 监听，**事务提交后**再投递 Kafka / RabbitMQ —— 避免事务回滚了消息却发出去。
+3. 插订单表 1 条（状态 1 待付款 / 支付状态未支付）→ 插订单明细 n 条 → **清空购物车** → **写本地消息表 `mq_message`（2 条：超时取消 + 统计）**，整体 `@Transactional`。
+4. 发布 **`OrderCreatedEvent`**，`@TransactionalEventListener(AFTER_COMMIT)` 在**事务提交后**触发立即发送。
+5. 发送失败由 **`MqMessageCompensator` 定时补偿**重发，超过 5 次进死亡态 —— 保证"业务成功则消息必达"。
 6. 锁的释放注册在 `TransactionSynchronization.afterCompletion`，**事务提交或回滚后统一解锁**。
 
 ### 3.10 订单超时取消（重点中的重点）
@@ -118,35 +118,37 @@
 **方案：RabbitMQ TTL + 死信队列**（不依赖延迟插件）。
 
 ```
-下单提交 → order.delay.exchange → order.delay.queue（TTL 15min，无消费者）
-              ↓ 消息过期变死信
-          order.cancel.exchange → order.cancel.queue → 消费者
+下单提交 → 本地消息表 → order.delay.exchange → order.delay.queue（TTL 15min，无消费者）
+                              ↓ 消息过期变死信
+                          order.cancel.exchange → order.cancel.queue → 消费者
 ```
 
 - 消费者执行 **`update orders set status=6 ... where id=? and status=1`**，**带状态的条件更新天然幂等**，重复投递也只会改一次。
+- **可靠性靠本地消息表**：消息先落库（和订单同事务），再异步投递，投递失败由补偿任务重发，MQ 宕机也不会丢。
 - 开关：`sky.messaging.rabbitmq.enabled`，`@ConditionalOnProperty` 控制装配，**本地默认关闭**。
 - 兜底：`OrderTimeoutFallbackTask`，只在 MQ 关闭时启用（每分钟扫表），**主链路 MQ，降级定时任务**。
 
 ### 3.11 Kafka 订单事件与统计
 
-- 下单提交后发 `order.created` 主题，**key = orderId**（同订单进同一分区，保证局部有序）。
+- 下单提交后，本地消息表按 `bizType=ORDER_STATS` 投递 `order.created` 主题，**key = orderId**（同订单进同一分区，保证局部有序）。
 - 消费者组 `sky-order-statistics`：先 `SETNX order:statistics:processed:{orderId}`（8 天过期）**去重**，再 `INCR order:statistics:created:{日期}` 累加当日下单量。
 - 目的：**把统计类非核心逻辑从下单主链路摘出去**，下单接口只做写库，响应更快。
 
 ### 3.12 微信支付
 
 - 下单：`WeChatPayUtil.pay()` 调 V3 JSAPI 下单拿 `prepay_id`，再做**二次签名**（appid/timeStamp/nonceStr/package 拼串，`SHA256withRSA`），返回给小程序调起支付。
-- 回调 `/notify/paySuccess`：读 body → **用 apiV3Key 做 AES-GCM 解密**（AesUtil）→ 取 `out_trade_no` → 改订单状态为待接单 + 支付状态已支付 → **WebSocket 推送来单提醒** → 返回 `{code:"SUCCESS"}` 给微信。
-- 退款：取消/拒单时若已支付，调退款接口，退款单号复用商户订单号。
+- 回调 `/notify/paySuccess`：读 body + 请求头（`Wechatpay-Serial/Signature/Timestamp/Nonce`）→ **`AutoUpdateCertificatesVerifier` 验签 + 解密一体化**（`NotificationHandler.parse`，验签失败直接抛异常，防伪造回调）→ 取 `out_trade_no` → 改订单状态（幂等）→ **WebSocket 广播来单提醒** → 返回 `{code:"SUCCESS"}` 给微信。
+- 退款：取消/拒单时若已支付，按订单**实际金额**退款，退款单号复用商户订单号。
 
-### 3.13 WebSocket 实时推送
+### 3.13 WebSocket 实时推送（Redis Pub/Sub 广播）
 
-- `@ServerEndpoint("/ws/{sid}")`，**static Map 存 sid → Session**，`@OnOpen/@OnClose/@OnMessage` 维护。
+- `@ServerEndpoint("/ws/{sid}")`，session 存**本节点内存**，`@OnOpen/@OnClose/@OnMessage` 维护。
+- **跨节点推送靠 Redis Pub/Sub**：业务侧 `publish` 到频道 → 各节点 `MessageListener` 收到后推给**本节点持有的 session**（session 不可序列化，只能本地推）。
 - 两种消息：`type=1 来单提醒`，`type=2 客户催单`，管理端页面收到后弹窗 + 语音。
 
 ### 3.14 定时任务
 
-- `OrderTask`：每天凌晨 1 点，把**派送中且超过 60 分钟**的订单置为已完成。
+- `OrderTask`：每天凌晨 1 点，把**派送中且超过 60 分钟**的订单置为已完成；加 **Redis 分布式锁**，多实例只执行一次。
 - 超时取消已交给 MQ（见 3.10）。
 
 ### 3.15 数据统计 + 报表导出
@@ -191,10 +193,12 @@ MQ 方案是**订单维度**的，下单就投递一条延迟消息，天然**�
 
 ### Q4：消息会不会丢？怎么保证？
 
-三层都要做：
-- **生产者**：RabbitMQ 开 `publisher-confirm`（确认到达交换机）+ `publisher-return`（路由失败回调）；Kafka 设 `acks=all` + `retries`。
+「我项目里**第一道防线是本地消息表**：消息和业务数据写进**同一个本地事务**，事务提交后再投递 MQ，投递失败由补偿任务重发，超过上限进死亡态告警——这就从根上解决了"业务成功了但消息没发出去"。
+
+再往后是 MQ 本身的三层：
+- **生产者**：RabbitMQ 开 `publisher-confirm` + `publisher-return`；Kafka 设 `acks=all` + `retries`。
 - **Broker**：交换机、队列、消息都 **durable 持久化**；Kafka 靠多副本 ISR。
-- **消费者**：RabbitMQ 改**手动 ACK**，业务成功再 ack，失败 nack 重回队列；Kafka **处理完再提交 offset**（项目里手动关了自动提交）。
+- **消费者**：RabbitMQ **手动 ACK**；Kafka **处理完再提交 offset**。」
 
 ### Q5：重复消费怎么办？
 
@@ -202,7 +206,7 @@ MQ 方案是**订单维度**的，下单就投递一条延迟消息，天然**�
 1. **数据库条件更新**：`update ... where id=? and status=1`，状态已经变了就更新 0 行，天然幂等（RabbitMQ 取消订单用的这个）；
 2. **Redis SETNX 去重表**：消费前先 `setIfAbsent(业务唯一键)`，成功才处理，TTL 给足业务周期（Kafka 统计用的这个，8 天）。
 
-更进一步可以建**消息去重表**，用 `msgId` 建唯一索引。」
+本地消息表的 `markSent` 也用 `where status=0` 条件更新，保证并发发送下只标记一次。更进一步可以建**消息去重表**，用 `msgId` 建唯一索引。」
 
 ### Q6：消息堆积了怎么排查？
 
@@ -210,11 +214,10 @@ MQ 方案是**订单维度**的，下单就投递一条延迟消息，天然**�
 
 ### Q7：你下单用的 Redis 分布式锁，细节讲讲？
 
-- 加锁：`SET key token NX EX 30`，**一条命令保证原子性**（不用 setnx + expire 两步，那会死锁）。
-- 解锁：**Lua 脚本**先 `get` 比对 token 再 `del`，**防误删别人的锁**（自己锁超时了被别人拿到，再去 del 就删错了）；脚本保证原子。
-- token 用 UUID，代表**锁归属**。
-- **锁时长 30 秒**是业务预估，且锁在**事务完成后**才释放（注册在 `afterCompletion`），防止前一个请求还没提交，下一个重复请求就进来。
-- 追问续期：业务执行超过 30 秒锁会过期 → 生产上用 **Redisson 的 watchdog 自动续期**，自己实现的话起一个守护线程每隔 1/3 时间续一次。
+「现在直接用 **Redisson 的 `RLock`**，但原理我清楚：
+- 自研的话是 `SET key token NX EX 30`，**一条命令保证原子性**（不用 setnx + expire 两步，那会死锁）；解锁用 **Lua 脚本**先比对 token 再 del，**防误删别人的锁**。
+- Redisson 在此基础上做了三件事：**watchdog 看门狗**（`leaseTime=-1` 时默认 30s，业务执行期间每 10s 自动续期，业务跑多久锁就持有多久）、**可重入**、**公平锁/联锁等更多原语**。
+- 锁在**事务完成后**才释放（注册在 `afterCompletion`），防止前一个请求还没提交，下一个重复请求就进来；进程崩溃后 watchdog 停止，30s 后锁自动释放，不会死锁。」
 
 ### Q8：ThreadLocal 为什么内存泄漏？
 
@@ -248,20 +251,20 @@ MQ 方案是**订单维度**的，下单就投递一条延迟消息，天然**�
 
 「基于 **MyBatis 拦截器（Interceptor）**，拦截 `Executor.query`，从 `ThreadLocal` 里取出分页参数，**改写 SQL 拼上 limit**，另外再发一条 `count(*)` 查总数。所以 `startPage` 后面必须**紧跟**要分页的查询，中间不能插别的查询，否则会污染。」
 
-### Q13：订单号用时间戳会不会重复？
+### Q13：订单号怎么生成？会不会重复？
 
-「会。`System.currentTimeMillis()` 在**毫秒级并发**下会撞。生产上应该换成 **雪花算法 / 数据库号段 / Redis INCR**，或者至少 `时间戳 + 用户id后几位 + 随机数`。这是我项目明确的**可优化点**。」
+「我用**雪花算法**（`SnowflakeIdGenerator`）：1 位符号位 + 41 位时间戳 + 5 位机器 ID + 12 位序列号，`synchronized` 保证同毫秒内序列号递增。比 `System.currentTimeMillis()` 强在**毫秒级并发不撞号**、趋势递增利于索引。集群下不同实例配不同 workerId；时钟回拨会主动拒绝生成。也可以选数据库号段（Leaf）或 Redis INCR，但雪花最简单且不依赖外部组件。」
 
 ### Q14：支付回调怎么保证安全和幂等？
 
-- **验签**：验证 `Wechatpay-Serial`、`Wechatpay-Signature` 头，确认请求确实来自微信（项目里做了 AES 解密，验签可以再加一层）。
+- **验签**：用官方 `AutoUpdateCertificatesVerifier` + `NotificationHandler.parse()`，把 `Wechatpay-Serial/Signature/Timestamp/Nonce` 头一起丢进去做**验签 + 解密一体化**，验签不过直接抛异常（`ValidationException`），从根上杜绝伪造"支付成功"回调。验签器还会定时更新平台证书，防证书轮换后失效。
 - **幂等**：微信会**重复推送**直到收到 SUCCESS，所以改状态前**先判断订单当前状态**，已支付就直接返回成功，别重复加钱/重复发货。
 - **响应**：必须返回 200 + `{code:"SUCCESS"}`，否则微信会持续重发。
 - **回调地址必须是公网 HTTPS**，本地开发用内网穿透（项目配的是 cpolar 域名）。
 
-### Q15：WebSocket 集群下能用吗？
+### Q15：WebSocket 集群下怎么推送？
 
-「**不能**。现在 session 存在 `static HashMap` 里，是**单机内存**，多实例时管理端连的是 A 节点、支付回调打在 B 节点，消息就推不到。解决方案：用 **Redis Pub/Sub 或 MQ 广播**，每个节点订阅后各自推给自己持有的 session；或者直接上 **Spring WebSocket + STOMP + RabbitMQ 作为 broker**。」
+「session 存**单机内存**，多实例时管理端连 A 节点、支付回调打在 B 节点就推不到。我改成 **Redis Pub/Sub 广播**：业务侧 `publish` 到频道，每个节点通过 `MessageListener` 订阅，收到后推给**自己本地持有的 session**。因为 **session 不可序列化、不能存 Redis**，所以正确做法不是共享 session，而是**广播消息 + 各节点本地转发**。生产规模更大时可以上 Spring WebSocket + STOMP + RabbitMQ 做 broker。」
 
 ### Q16：订单列表有没有 N+1 问题？
 
@@ -319,9 +322,9 @@ MQ 方案是**订单维度**的，下单就投递一条延迟消息，天然**�
 
 | 问题 | 现状 | 改进方向 |
 |---|---|---|
-| 订单号重复 | `System.currentTimeMillis()` | 雪花算法 / Redis INCR |
-| WebSocket 单机 | session 存静态 Map | Redis Pub/Sub 或 MQ 广播 |
-| 支付回调用户身份 | `paySuccess` 依赖 `BaseContext`，但回调来自微信服务器**无 token**，ThreadLocal 取不到 | 回调接口不依赖登录态，直接按 `out_trade_no` 处理 |
+| ~~订单号重复~~ | 已修复 | ✅ 雪花算法 `SnowflakeIdGenerator` |
+| ~~WebSocket 单机~~ | 已修复 | ✅ Redis Pub/Sub 广播 |
+| ~~支付回调用户身份~~ | 已修复 | ✅ 按 `orderNumber` 查询，不依赖登录态 |
 | ~~菜品查询未缓存~~ | 已修复 | ✅ Spring Cache + Cache Aside + 事务提交后删缓存 |
 | N+1 查询 | 订单明细循环单查 | `where order_id in (...)` 批量查 |
 | 密码 MD5 | 无盐 | BCrypt / MD5 + 随机盐 |

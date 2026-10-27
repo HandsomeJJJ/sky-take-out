@@ -3,9 +3,8 @@ package com.sky.controller.nofity;
 import com.alibaba.druid.support.json.JSONUtils;
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
-import com.sky.properties.WeChatProperties;
 import com.sky.service.OrderService;
-import com.wechat.pay.contrib.apache.httpclient.util.AesUtil;
+import com.sky.utils.WeChatPayUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.http.entity.ContentType;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -27,12 +26,13 @@ public class PayNotifyController {
     @Autowired
     private OrderService orderService;
     @Autowired
-    private WeChatProperties weChatProperties;
+    private WeChatPayUtil weChatPayUtil;
 
     /**
      * 支付成功回调
      *
      * @param request
+     * @param response
      */
     @RequestMapping("/paySuccess")
     public void paySuccessNotify(HttpServletRequest request, HttpServletResponse response) throws Exception {
@@ -40,9 +40,15 @@ public class PayNotifyController {
         String body = readData(request);
         log.info("支付成功回调：{}", body);
 
-        //数据解密
-        String plainText = decryptData(body);
-        log.info("解密后的文本：{}", plainText);
+        //读取请求头中的验签字段
+        String serial = request.getHeader("Wechatpay-Serial");
+        String timestamp = request.getHeader("Wechatpay-Timestamp");
+        String nonce = request.getHeader("Wechatpay-Nonce");
+        String signature = request.getHeader("Wechatpay-Signature");
+
+        //验签 + 解密一体化：验签失败会抛异常被拦截，防止伪造"支付成功"回调
+        String plainText = weChatPayUtil.verifyAndDecrypt(body, serial, timestamp, nonce, signature);
+        log.info("验签通过，解密后的文本：{}", plainText);
 
         JSONObject jsonObject = JSON.parseObject(plainText);
         String outTradeNo = jsonObject.getString("out_trade_no");//商户平台订单号
@@ -76,29 +82,6 @@ public class PayNotifyController {
             result.append(line);
         }
         return result.toString();
-    }
-
-    /**
-     * 数据解密
-     *
-     * @param body
-     * @return
-     * @throws Exception
-     */
-    private String decryptData(String body) throws Exception {
-        JSONObject resultObject = JSON.parseObject(body);
-        JSONObject resource = resultObject.getJSONObject("resource");
-        String ciphertext = resource.getString("ciphertext");
-        String nonce = resource.getString("nonce");
-        String associatedData = resource.getString("associated_data");
-
-        AesUtil aesUtil = new AesUtil(weChatProperties.getApiV3Key().getBytes(StandardCharsets.UTF_8));
-        //密文解密
-        String plainText = aesUtil.decryptToString(associatedData.getBytes(StandardCharsets.UTF_8),
-                nonce.getBytes(StandardCharsets.UTF_8),
-                ciphertext);
-
-        return plainText;
     }
 
     /**

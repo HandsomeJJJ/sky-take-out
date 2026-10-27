@@ -78,6 +78,24 @@ public interface OrderMapper {
                                  @Param("cancelTime") LocalDateTime cancelTime);
 
     /**
+     * 带前置状态的状态推进（乐观锁）：仅当当前状态等于 expectedStatus 才更新。
+     * 并发下两个请求同时接单/派送，只有一个能成功，避免重复更新。
+     */
+    @org.apache.ibatis.annotations.Update("update orders set status = #{newStatus} " +
+            "where id = #{id} and status = #{expectedStatus}")
+    int updateStatus(@Param("id") Long id, @Param("expectedStatus") Integer expectedStatus,
+                     @Param("newStatus") Integer newStatus);
+
+    /**
+     * 完成订单：同样带前置状态条件，同时写入送达时间。
+     */
+    @org.apache.ibatis.annotations.Update("update orders set status = #{newStatus}, delivery_time = #{deliveryTime} " +
+            "where id = #{id} and status = #{expectedStatus}")
+    int completeByIdAndExpectedStatus(@Param("id") Long id, @Param("expectedStatus") Integer expectedStatus,
+                                      @Param("newStatus") Integer newStatus,
+                                      @Param("deliveryTime") LocalDateTime deliveryTime);
+
+    /**
      * 根据动态条件统计营业额数据
      * @param map
      * @return

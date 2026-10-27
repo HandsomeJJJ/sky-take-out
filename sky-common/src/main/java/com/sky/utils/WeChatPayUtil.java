@@ -4,6 +4,13 @@ import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
 import com.sky.properties.WeChatProperties;
 import com.wechat.pay.contrib.apache.httpclient.WechatPayHttpClientBuilder;
+import com.wechat.pay.contrib.apache.httpclient.auth.AutoUpdateCertificatesVerifier;
+import com.wechat.pay.contrib.apache.httpclient.auth.PrivateKeySigner;
+import com.wechat.pay.contrib.apache.httpclient.auth.Verifier;
+import com.wechat.pay.contrib.apache.httpclient.auth.WechatPay2Credentials;
+import com.wechat.pay.contrib.apache.httpclient.notification.Notification;
+import com.wechat.pay.contrib.apache.httpclient.notification.NotificationHandler;
+import com.wechat.pay.contrib.apache.httpclient.notification.NotificationRequest;
 import com.wechat.pay.contrib.apache.httpclient.util.PemUtil;
 import org.apache.commons.lang.RandomStringUtils;
 import org.apache.http.HttpHeaders;
@@ -21,6 +28,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.security.PrivateKey;
 import java.security.Signature;
 import java.security.cert.X509Certificate;
@@ -44,16 +52,25 @@ public class WeChatPayUtil {
     @Autowired
     private WeChatProperties weChatProperties;
 
+    /** 验签器，懒加载单例，内部会定时自动更新微信平台证书 */
+    private volatile Verifier verifier;
+
+    /**
+     * 加载商户 API 私钥。
+     */
+    private PrivateKey loadPrivateKey() throws FileNotFoundException {
+        return PemUtil.loadPrivateKey(new FileInputStream(new File(weChatProperties.getPrivateKeyFilePath())));
+    }
+
     /**
      * 获取调用微信接口的客户端工具对象
      *
      * @return
      */
     private CloseableHttpClient getClient() {
-        PrivateKey merchantPrivateKey = null;
         try {
             //merchantPrivateKey商户API私钥，如何加载商户API私钥请看常见问题
-            merchantPrivateKey = PemUtil.loadPrivateKey(new FileInputStream(new File(weChatProperties.getPrivateKeyFilePath())));
+            PrivateKey merchantPrivateKey = loadPrivateKey();
             //加载平台证书文件
             X509Certificate x509Certificate = PemUtil.loadCertificate(new FileInputStream(new File(weChatProperties.getWeChatPayCertFilePath())));
             //wechatPayCertificates微信支付平台证书列表。你也可以使用后面章节提到的“定时更新平台证书功能”，而不需要关心平台证书的来龙去脉
@@ -70,6 +87,48 @@ public class WeChatPayUtil {
             e.printStackTrace();
             return null;
         }
+    }
+
+    /**
+     * 验签 + 解密一体化：校验微信支付回调的应答签名，并返回解密后的明文 resource。
+     * 只有验签通过才会解密，任何人伪造请求都会在此抛异常被拦截。
+     */
+    public String verifyAndDecrypt(String body, String serial, String timestamp, String nonce, String signature) throws Exception {
+        NotificationRequest request = new NotificationRequest.Builder()
+                .withSerialNumber(serial)
+                .withTimestamp(timestamp)
+                .withNonce(nonce)
+                .withSignature(signature)
+                .withBody(body)
+                .build();
+
+        NotificationHandler handler = new NotificationHandler(getVerifier(),
+                weChatProperties.getApiV3Key().getBytes(StandardCharsets.UTF_8));
+        Notification notification = handler.parse(request);
+        return notification.getDecryptData();
+    }
+
+    /**
+     * 验签器（懒加载单例）。AutoUpdateCertificatesVerifier 会定时更新微信平台证书，
+     * 避免平台证书轮换后验签失败。
+     */
+    private Verifier getVerifier() {
+        if (verifier == null) {
+            synchronized (this) {
+                if (verifier == null) {
+                    try {
+                        WechatPay2Credentials credentials = new WechatPay2Credentials(
+                                weChatProperties.getMchid(),
+                                new PrivateKeySigner(weChatProperties.getMchSerialNo(), loadPrivateKey()));
+                        verifier = new AutoUpdateCertificatesVerifier(
+                                credentials, weChatProperties.getApiV3Key().getBytes(StandardCharsets.UTF_8));
+                    } catch (FileNotFoundException e) {
+                        throw new RuntimeException("加载商户私钥失败，无法初始化验签器", e);
+                    }
+                }
+            }
+        }
+        return verifier;
     }
 
     /**

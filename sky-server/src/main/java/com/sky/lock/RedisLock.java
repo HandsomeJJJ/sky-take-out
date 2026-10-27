@@ -1,35 +1,55 @@
 package com.sky.lock;
 
-import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.redisson.api.RLock;
+import org.redisson.api.RedissonClient;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
-import java.util.Collections;
-import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
-/** 基于 SET NX EX 的锁；Lua 脚本保证比较令牌和删除是原子操作。 */
+/**
+ * 基于 Redisson 的分布式锁。
+ *
+ * 相比自研的 SET NX EX + Lua，Redisson 额外提供：
+ * 1. watchdog 看门狗自动续期：leaseTime 传 -1 时，锁默认 30s，业务执行期间每 10s 自动续期，
+ *    不会因为业务超时导致锁提前失效；进程崩溃后 watchdog 停止，30s 后锁自动释放，不会死锁；
+ * 2. 可重入：同一线程可重复加锁；
+ * 3. 公平锁 / 联锁 / 红锁等更多原语。
+ */
 @Component
 public class RedisLock {
-    private static final DefaultRedisScript<Long> UNLOCK_SCRIPT = new DefaultRedisScript<>(
-            "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
-            Long.class);
-    private final StringRedisTemplate stringRedisTemplate;
 
-    public RedisLock(StringRedisTemplate stringRedisTemplate) {
-        this.stringRedisTemplate = stringRedisTemplate;
+    private final RedissonClient redissonClient;
+
+    public RedisLock(RedissonClient redissonClient) {
+        this.redissonClient = redissonClient;
     }
 
-    /** 返回锁令牌；未获取锁时返回 null。 */
-    public String tryLock(String key, Duration timeout) {
-        String token = UUID.randomUUID().toString();
-        Boolean locked = stringRedisTemplate.opsForValue().setIfAbsent(key, token, timeout);
-        return Boolean.TRUE.equals(locked) ? token : null;
+    /**
+     * 尝试获取锁，最多等待 waitTime 毫秒。
+     *
+     * @param key      锁的 key
+     * @param waitTime 最长等待时间，传 Duration.ZERO 表示不等待立即返回
+     * @return 是否获取到锁
+     */
+    public boolean tryLock(String key, Duration waitTime) {
+        RLock lock = redissonClient.getLock(key);
+        try {
+            // leaseTime=-1 启用 watchdog 自动续期
+            return lock.tryLock(waitTime.toMillis(), -1, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
     }
 
-    public void unlock(String key, String token) {
-        if (token != null) {
-            stringRedisTemplate.execute(UNLOCK_SCRIPT, Collections.singletonList(key), token);
+    /**
+     * 释放锁。仅当锁被当前线程持有时才释放，避免误删。
+     */
+    public void unlock(String key) {
+        RLock lock = redissonClient.getLock(key);
+        if (lock.isHeldByCurrentThread()) {
+            lock.unlock();
         }
     }
 }

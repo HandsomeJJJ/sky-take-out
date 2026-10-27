@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.jsontype.PolymorphicTypeValidator;
 import com.fasterxml.jackson.databind.jsontype.BasicPolymorphicTypeValidator;
 import com.sky.json.JacksonObjectMapper;
+import com.sky.websocket.WebSocketMessagePublisher;
+import com.sky.websocket.WebSocketMessageSubscriber;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.cache.CacheManager;
 import org.springframework.cache.transaction.TransactionAwareCacheManagerProxy;
@@ -14,6 +16,8 @@ import org.springframework.data.redis.cache.RedisCacheConfiguration;
 import org.springframework.data.redis.cache.RedisCacheManager;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.listener.ChannelTopic;
+import org.springframework.data.redis.listener.RedisMessageListenerContainer;
 import org.springframework.data.redis.serializer.GenericJackson2JsonRedisSerializer;
 import org.springframework.data.redis.serializer.RedisSerializationContext;
 import org.springframework.data.redis.serializer.StringRedisSerializer;
@@ -57,6 +61,19 @@ public class RedisConfiguration {
                 .build();
 
         return new TransactionAwareCacheManagerProxy(redisCacheManager);
+    }
+
+    /**
+     * Redis Pub/Sub 监听容器：订阅 WebSocket 广播频道，实现多实例消息推送。
+     */
+    @Bean
+    public RedisMessageListenerContainer redisMessageListenerContainer(
+            RedisConnectionFactory redisConnectionFactory,
+            WebSocketMessageSubscriber webSocketMessageSubscriber) {
+        RedisMessageListenerContainer container = new RedisMessageListenerContainer();
+        container.setConnectionFactory(redisConnectionFactory);
+        container.addMessageListener(webSocketMessageSubscriber, new ChannelTopic(WebSocketMessagePublisher.CHANNEL));
+        return container;
     }
 
     /**
