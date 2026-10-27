@@ -1,36 +1,54 @@
+# 本地/演示编排。
+# 默认值都是"只在本机能跑"的弱口令，任何对外环境都必须用 .env 覆盖 ——
+# 应用侧的 JWT_SECRET / DB_PASSWORD / REDIS_PASSWORD 没有默认值，缺失时启动会直接失败。
 services:
   mysql:
     image: mysql:8.0
     container_name: sky-mysql
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
     environment:
-      MYSQL_ROOT_PASSWORD: root
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-sky_local_dev_password}
       MYSQL_DATABASE: sky_take_out
       TZ: Asia/Shanghai
     ports:
-      - "3306:3306"
+      # 只绑到回环地址：不要把 3306 暴露到局域网，本机客户端照常用
+      - "127.0.0.1:3306:3306"
     volumes:
       - mysql-data:/var/lib/mysql
-      # 首次初始化时执行目录下的 SQL（含本地消息表 mq_message）
-      - ./sky-server/src/main/resources/db:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -proot"]
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD"]
       interval: 10s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1g
 
   redis:
     image: redis:7-alpine
     container_name: sky-redis
-    command: redis-server --appendonly yes --requirepass 123456
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-sky_local_dev_password}
+    environment:
+      # 供 healthcheck 里的 redis-cli 使用
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-sky_local_dev_password}
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis-data:/data
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a 123456 ping | grep PONG"]
+      test: ["CMD-SHELL", "redis-cli -a \"$REDIS_PASSWORD\" ping | grep PONG"]
       interval: 10s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512m
 
   kafka:
     image: bitnami/kafka:3.7
@@ -44,11 +62,13 @@ services:
       KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
       KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_CFG_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+      # 关掉自动建 topic：order.created 由应用启动时显式声明分区与副本数
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_CFG_MIN_INSYNC_REPLICAS: 1
       KAFKA_KRAFT_CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
       ALLOW_PLAINTEXT_LISTENER: "yes"
     ports:
-      - "9092:9092"
+      - "127.0.0.1:9092:9092"
     volumes:
       - kafka-data:/bitnami/kafka
     healthcheck:
@@ -57,16 +77,21 @@ services:
       timeout: 10s
       retries: 15
       start_period: 30s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1g
 
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
     container_name: sky-rabbitmq
     environment:
-      RABBITMQ_DEFAULT_USER: guest
-      RABBITMQ_DEFAULT_PASS: guest
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USERNAME:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
     ports:
-      - "5672:5672"
-      - "15672:15672"
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
     healthcheck:
@@ -74,17 +99,32 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1g
 
   app:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: sky-server
+    init: true
     environment:
       SPRING_PROFILES_ACTIVE: docker
       TZ: Asia/Shanghai
-      # JVM 参数，可按需调整
-      JAVA_OPTS: "-Xms512m -Xmx512m -XX:+UseG1GC"
+      DB_USERNAME: root
+      DB_PASSWORD: ${MYSQL_ROOT_PASSWORD:-sky_local_dev_password}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-sky_local_dev_password}
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-guest}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-guest}
+      # JWT 签名密钥必须 >=32 字节；这里给的是本地占位，线上必须换成自己的随机值
+      JWT_ADMIN_SECRET_KEY: ${JWT_ADMIN_SECRET_KEY:?set JWT_ADMIN_SECRET_KEY in .env}
+      JWT_USER_SECRET_KEY: ${JWT_USER_SECRET_KEY:?set JWT_USER_SECRET_KEY in .env}
+      # 集群部署时每个实例必须是不同的值
+      SNOWFLAKE_WORKER_ID: ${SNOWFLAKE_WORKER_ID:-1}
+      JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=75.0 -XX:+UseG1GC -Djava.security.egd=file:/dev/./urandom"
     ports:
       - "8080:8080"
     depends_on:
@@ -102,7 +142,11 @@ services:
       timeout: 5s
       retries: 10
       start_period: 60s
-    restart: on-failure
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1g
 
 volumes:
   mysql-data:

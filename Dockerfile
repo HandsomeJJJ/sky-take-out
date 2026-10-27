@@ -10,7 +10,7 @@ COPY sky-pojo/pom.xml sky-pojo/pom.xml
 COPY sky-server/pom.xml sky-server/pom.xml
 RUN mvn -q -pl sky-server -am dependency:go-offline
 
-# 复制源码并打包（跳过测试）
+# 复制源码并打包（测试在 CI 里单独跑，镜像构建不重复承担）
 COPY sky-common sky-common
 COPY sky-pojo sky-pojo
 COPY sky-server sky-server
@@ -35,6 +35,9 @@ USER appuser
 
 EXPOSE 8080
 
-# JVM 参数可通过环境变量覆盖；默认 512m 堆 + G1 垃圾回收器
-ENV JAVA_OPTS="-Xms512m -Xmx512m -XX:+UseG1GC -Djava.security.egd=file:/dev/./urandom"
-ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar /app/app.jar"]
+# 堆大小按容器内存比例给，不要写死 -Xmx：
+# 写死之后容器 limit 一改就会 OOMKilled，或者反过来浪费内存
+ENV JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75.0 -XX:+UseG1GC -Djava.security.egd=file:/dev/./urandom"
+
+# exec 形式 + 不加 sh -c：SIGTERM 才能直达 JVM 进程，容器 stop 时才会走优雅停机
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]
