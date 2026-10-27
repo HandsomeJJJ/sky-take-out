@@ -2,6 +2,7 @@ package com.sky.mapper;
 
 import com.sky.entity.ShoppingCart;
 import org.apache.ibatis.annotations.Delete;
+import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Update;
@@ -25,6 +26,19 @@ public interface ShoppingCartMapper {
     void updateNumberById(ShoppingCart shoppingCart);
 
     /**
+     * 数据库内自增，避免"先查出来 +1 再覆盖写回"在并发下丢失更新。
+     * 返回 0 表示已达单行数量上限。
+     */
+    @Update("update shopping_cart set number = number + 1 where id = #{id} and number < #{maxNumber}")
+    int increaseNumberById(@Param("id") Long id, @Param("maxNumber") int maxNumber);
+
+    /**
+     * 数据库内自减，仅当数量仍大于 1 时生效；返回 0 表示应该删除这一行
+     */
+    @Update("update shopping_cart set number = number - 1 where id = #{id} and number > 1")
+    int decreaseNumberById(@Param("id") Long id);
+
+    /**
      * 插入购物车数据
      * @param shoppingCart
      */
@@ -45,6 +59,12 @@ public interface ShoppingCartMapper {
      */
     @Delete("delete from shopping_cart where id = #{id}")
     void deleteById(Long id);
+
+    /**
+     * 删除自己的购物车行：id 是客户端传入的，必须带上 user_id 才不能删别人的记录
+     */
+    @Delete("delete from shopping_cart where id = #{id} and user_id = #{userId}")
+    int deleteByIdAndUserId(@Param("id") Long id, @Param("userId") Long userId);
 
     /**
      * 批量插入购物车数据

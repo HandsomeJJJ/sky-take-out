@@ -12,19 +12,22 @@ import com.sky.dto.EmployeePageQueryDTO;
 import com.sky.entity.Employee;
 import com.sky.exception.AccountLockedException;
 import com.sky.exception.AccountNotFoundException;
+import com.sky.exception.BaseException;
 import com.sky.exception.PasswordErrorException;
 import com.sky.mapper.EmployeeMapper;
 import com.sky.result.PageResult;
 import com.sky.service.EmployeeService;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
-import org.springframework.util.DigestUtils;
+import com.sky.utils.PasswordHasher;
 
 import java.time.LocalDateTime;
 import java.util.List;
 
 @Service
+@Slf4j
 public class EmployeeServiceImpl implements EmployeeService {
 
     @Autowired
@@ -49,15 +52,19 @@ public class EmployeeServiceImpl implements EmployeeService {
             throw new AccountNotFoundException(MessageConstant.ACCOUNT_NOT_FOUND);
         }
 
-        //密码比对
-        //对前端传过来的明文密码进行md5加密处理
-        password = DigestUtils.md5DigestAsHex(password.getBytes());
-        if (!password.equals(employee.getPassword())) {
+        //密码比对：库里存的是哈希，用哈希算法自带的 matches 比较，不做反向解密
+        if (!PasswordHasher.matches(password, employee.getPassword())) {
             //密码错误
             throw new PasswordErrorException(MessageConstant.PASSWORD_ERROR);
         }
 
-        if (employee.getStatus() == StatusConstant.DISABLE) {
+        // 老数据仍是无盐 MD5：本次登录校验已通过，就地重写成 BCrypt，避免把已有账号锁在门外
+        if (PasswordHasher.isLegacyMd5(employee.getPassword())) {
+            employeeMapper.updatePasswordById(employee.getId(), PasswordHasher.hash(password));
+            log.info("员工 {} 的密码已从 MD5 就地升级为 BCrypt", employee.getUsername());
+        }
+
+        if (StatusConstant.DISABLE.equals(employee.getStatus())) {
             //账号被锁定
             throw new AccountLockedException(MessageConstant.ACCOUNT_LOCKED);
         }
@@ -81,7 +88,7 @@ public class EmployeeServiceImpl implements EmployeeService {
         employee.setStatus(StatusConstant.ENABLE);
 
         //设置密码，默认密码123456
-        employee.setPassword(DigestUtils.md5DigestAsHex(PasswordConstant.DEFAULT_PASSWORD.getBytes()));
+        employee.setPassword(PasswordHasher.hash(PasswordConstant.DEFAULT_PASSWORD));
 
         //设置当前记录的创建时间和修改时间
         //employee.setCreateTime(LocalDateTime.now());
@@ -103,7 +110,9 @@ public class EmployeeServiceImpl implements EmployeeService {
     public PageResult pageQuery(EmployeePageQueryDTO employeePageQueryDTO) {
         // select * from employee limit 0,10
         //开始分页查询
-        PageHelper.startPage(employeePageQueryDTO.getPage(), employeePageQueryDTO.getPageSize());
+        int pageNum = employeePageQueryDTO.getPage() < 1 ? 1 : employeePageQueryDTO.getPage();
+        int limit = Math.min(Math.max(employeePageQueryDTO.getPageSize(), 1), 100);
+        PageHelper.startPage(pageNum, limit);
 
         Page<Employee> page = employeeMapper.pageQuery(employeePageQueryDTO);
 
@@ -142,6 +151,9 @@ public class EmployeeServiceImpl implements EmployeeService {
      */
     public Employee getById(Long id) {
         Employee employee = employeeMapper.getById(id);
+        if (employee == null) {
+            throw new BaseException("员工不存在");
+        }
         employee.setPassword("****");
         return employee;
     }
@@ -154,6 +166,8 @@ public class EmployeeServiceImpl implements EmployeeService {
     public void update(EmployeeDTO employeeDTO) {
         Employee employee = new Employee();
         BeanUtils.copyProperties(employeeDTO, employee);
+        // 账号名不允许通过编辑接口改写，否则等于可以把管理员账号改名后接管
+        employee.setUsername(null);
 
         //employee.setUpdateTime(LocalDateTime.now());
         //employee.setUpdateUser(BaseContext.getCurrentId());

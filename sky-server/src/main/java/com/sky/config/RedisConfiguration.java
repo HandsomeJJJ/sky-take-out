@@ -29,15 +29,18 @@ import java.time.Duration;
 public class RedisConfiguration {
 
     @Bean
-    public RedisTemplate redisTemplate(RedisConnectionFactory redisConnectionFactory){
+    public RedisTemplate<String, Object> redisTemplate(RedisConnectionFactory redisConnectionFactory){
         log.info("开始创建redis模板对象...");
-        RedisTemplate redisTemplate = new RedisTemplate();
+        RedisTemplate<String, Object> redisTemplate = new RedisTemplate<>();
         //设置redis的连接工厂对象
         redisTemplate.setConnectionFactory(redisConnectionFactory);
         //设置redis key的序列化器
         redisTemplate.setKeySerializer(new StringRedisSerializer());
         // value 用 JSON：JDK 序列化存在反序列化 RCE 风险，且跨语言不可读、体积大
         redisTemplate.setValueSerializer(jsonSerializer());
+        // hash 系列要单独指定，否则 opsForHash 仍走默认的 JDK 序列化
+        redisTemplate.setHashKeySerializer(new StringRedisSerializer());
+        redisTemplate.setHashValueSerializer(jsonSerializer());
         return redisTemplate;
     }
 

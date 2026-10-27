@@ -11,6 +11,8 @@ import io.swagger.annotations.ApiOperation;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
+
+import javax.validation.Valid;
 import java.util.List;
 
 /**
@@ -32,7 +34,7 @@ public class CategoryController {
      */
     @PostMapping
     @ApiOperation("新增分类")
-    public Result<String> save(@RequestBody CategoryDTO categoryDTO){
+    public Result<String> save(@RequestBody @Valid CategoryDTO categoryDTO){
         log.info("新增分类：{}", categoryDTO);
         categoryService.save(categoryDTO);
         return Result.success();
@@ -71,7 +73,7 @@ public class CategoryController {
      */
     @PutMapping
     @ApiOperation("修改分类")
-    public Result<String> update(@RequestBody CategoryDTO categoryDTO){
+    public Result<String> update(@RequestBody @Valid CategoryDTO categoryDTO){
         categoryService.update(categoryDTO);
         return Result.success();
     }

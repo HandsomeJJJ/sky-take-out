@@ -4,6 +4,13 @@ spring:
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      # 等所有 ISR 确认，配合发送端的 future.get() 才算"消息必达"
+      acks: all
+      retries: 3
+      # 幂等生产者：重试不会产生重复消息
+      properties:
+        enable.idempotence: true
+        delivery.timeout.ms: 10000
     consumer:
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
@@ -11,20 +18,31 @@ spring:
   rabbitmq:
     host: rabbitmq
     port: 5672
-    username: guest
-    password: guest
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    template:
+      mandatory: true
+    listener:
+      simple:
+        acknowledge-mode: manual
+        prefetch: 10
+        concurrency: 2
+        max-concurrency: 8
+    username: ${RABBITMQ_USERNAME:guest}
+    password: ${RABBITMQ_PASSWORD:guest}
 
 sky:
   datasource:
     host: mysql
     port: 3306
     database: sky_take_out
-    username: root
-    password: root
+    username: ${DB_USERNAME:root}
+    # 容器内也不需要写死：由 compose 从环境注入
+    password: ${DB_PASSWORD}
   redis:
     host: redis
     port: 6379
-    password: 123456
+    password: ${REDIS_PASSWORD}
     database: 10
   messaging:
     kafka:

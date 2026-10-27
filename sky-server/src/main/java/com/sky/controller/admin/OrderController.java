@@ -15,6 +15,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
+import javax.validation.Valid;
+
 /**
  * 订单管理
  */
@@ -72,7 +74,7 @@ public class OrderController {
      */
     @PutMapping("/confirm")
     @ApiOperation("接单")
-    public Result confirm(@RequestBody OrdersConfirmDTO ordersConfirmDTO) {
+    public Result confirm(@RequestBody @Valid OrdersConfirmDTO ordersConfirmDTO) {
         orderService.confirm(ordersConfirmDTO);
         return Result.success();
     }
@@ -84,7 +86,7 @@ public class OrderController {
      */
     @PutMapping("/rejection")
     @ApiOperation("拒单")
-    public Result rejection(@RequestBody OrdersRejectionDTO ordersRejectionDTO) throws Exception {
+    public Result rejection(@RequestBody @Valid OrdersRejectionDTO ordersRejectionDTO) throws Exception {
         orderService.rejection(ordersRejectionDTO);
         return Result.success();
     }
@@ -96,7 +98,7 @@ public class OrderController {
      */
     @PutMapping("/cancel")
     @ApiOperation("取消订单")
-    public Result cancel(@RequestBody OrdersCancelDTO ordersCancelDTO) throws Exception {
+    public Result cancel(@RequestBody @Valid OrdersCancelDTO ordersCancelDTO) throws Exception {
         orderService.cancel(ordersCancelDTO);
         return Result.success();
     }

@@ -1,7 +1,6 @@
 package com.sky.utils;
 
-import com.alibaba.fastjson.JSON;
-import com.alibaba.fastjson.JSONObject;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.sky.properties.WeChatProperties;
 import com.wechat.pay.contrib.apache.httpclient.WechatPayHttpClientBuilder;
 import com.wechat.pay.contrib.apache.httpclient.auth.AutoUpdateCertificatesVerifier;
@@ -12,7 +11,7 @@ import com.wechat.pay.contrib.apache.httpclient.notification.Notification;
 import com.wechat.pay.contrib.apache.httpclient.notification.NotificationHandler;
 import com.wechat.pay.contrib.apache.httpclient.notification.NotificationRequest;
 import com.wechat.pay.contrib.apache.httpclient.util.PemUtil;
-import org.apache.commons.lang.RandomStringUtils;
+import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.http.HttpHeaders;
 import org.apache.http.client.methods.CloseableHttpResponse;
 import org.apache.http.client.methods.HttpGet;
@@ -28,6 +27,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.security.PrivateKey;
 import java.security.Signature;
@@ -35,7 +35,9 @@ import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 微信支付工具类
@@ -84,8 +86,8 @@ public class WeChatPayUtil {
             CloseableHttpClient httpClient = builder.build();
             return httpClient;
         } catch (FileNotFoundException e) {
-            e.printStackTrace();
-            return null;
+            // 原实现 printStackTrace 后返回 null，调用方直接 NPE 且看不出原因
+            throw new IllegalStateException("微信支付客户端初始化失败，请检查商户私钥与平台证书路径配置", e);
         }
     }
 
@@ -191,26 +193,38 @@ public class WeChatPayUtil {
      * @return
      */
     private String jsapi(String orderNum, BigDecimal total, String description, String openid) throws Exception {
-        JSONObject jsonObject = new JSONObject();
+        Map<String, Object> jsonObject = new LinkedHashMap<>();
         jsonObject.put("appid", weChatProperties.getAppid());
         jsonObject.put("mchid", weChatProperties.getMchid());
         jsonObject.put("description", description);
         jsonObject.put("out_trade_no", orderNum);
         jsonObject.put("notify_url", weChatProperties.getNotifyUrl());
 
-        JSONObject amount = new JSONObject();
-        amount.put("total", total.multiply(new BigDecimal(100)).setScale(2, BigDecimal.ROUND_HALF_UP).intValue());
+        Map<String, Object> amount = new LinkedHashMap<>();
+        amount.put("total", toFen(total));
         amount.put("currency", "CNY");
 
         jsonObject.put("amount", amount);
 
-        JSONObject payer = new JSONObject();
+        Map<String, Object> payer = new LinkedHashMap<>();
         payer.put("openid", openid);
 
         jsonObject.put("payer", payer);
 
-        String body = jsonObject.toJSONString();
+        String body = JsonUtils.toJson(jsonObject);
         return post(JSAPI, body);
+    }
+
+    /**
+     * 元转分。微信支付金额单位是分（整数）。
+     * 原实现是 multiply(new BigDecimal(100)).setScale(2, ROUND_HALF_UP).intValue()：
+     * setScale(2) 之后又 intValue() 截断，2.005 元这类金额会算错，改用 movePointRight + 精确取整。
+     */
+    public static int toFen(BigDecimal yuan) {
+        if (yuan == null || yuan.signum() <= 0) {
+            throw new IllegalArgumentException("微信支付金额必须大于 0，实际为：" + yuan);
+        }
+        return yuan.movePointRight(2).setScale(0, RoundingMode.HALF_UP).intValueExact();
     }
 
     /**
@@ -222,14 +236,12 @@ public class WeChatPayUtil {
      * @param openid      微信用户的openid
      * @return
      */
-    public JSONObject pay(String orderNum, BigDecimal total, String description, String openid) throws Exception {
+    public Map<String, Object> pay(String orderNum, BigDecimal total, String description, String openid) throws Exception {
         //统一下单，生成预支付交易单
         String bodyAsString = jsapi(orderNum, total, description, openid);
         //解析返回结果
-        JSONObject jsonObject = JSON.parseObject(bodyAsString);
-        System.out.println(jsonObject);
-
-        String prepayId = jsonObject.getString("prepay_id");
+        JsonNode jsonObject = JsonUtils.readTree(bodyAsString);
+        String prepayId = jsonObject.path("prepay_id").asText(null);
         if (prepayId != null) {
             String timeStamp = String.valueOf(System.currentTimeMillis() / 1000);
             String nonceStr = RandomStringUtils.randomNumeric(32);
@@ -252,7 +264,7 @@ public class WeChatPayUtil {
             String packageSign = Base64.getEncoder().encodeToString(signature.sign());
 
             //构造数据给微信小程序，用于调起微信支付
-            JSONObject jo = new JSONObject();
+            Map<String, Object> jo = new LinkedHashMap<>();
             jo.put("timeStamp", timeStamp);
             jo.put("nonceStr", nonceStr);
             jo.put("package", "prepay_id=" + prepayId);
@@ -261,7 +273,7 @@ public class WeChatPayUtil {
 
             return jo;
         }
-        return jsonObject;
+        return JsonUtils.toObject(bodyAsString, Map.class);
     }
 
     /**
@@ -274,19 +286,19 @@ public class WeChatPayUtil {
      * @return
      */
     public String refund(String outTradeNo, String outRefundNo, BigDecimal refund, BigDecimal total) throws Exception {
-        JSONObject jsonObject = new JSONObject();
+        Map<String, Object> jsonObject = new LinkedHashMap<>();
         jsonObject.put("out_trade_no", outTradeNo);
         jsonObject.put("out_refund_no", outRefundNo);
 
-        JSONObject amount = new JSONObject();
-        amount.put("refund", refund.multiply(new BigDecimal(100)).setScale(2, BigDecimal.ROUND_HALF_UP).intValue());
-        amount.put("total", total.multiply(new BigDecimal(100)).setScale(2, BigDecimal.ROUND_HALF_UP).intValue());
+        Map<String, Object> amount = new LinkedHashMap<>();
+        amount.put("refund", toFen(refund));
+        amount.put("total", toFen(total));
         amount.put("currency", "CNY");
 
         jsonObject.put("amount", amount);
         jsonObject.put("notify_url", weChatProperties.getRefundNotifyUrl());
 
-        String body = jsonObject.toJSONString();
+        String body = JsonUtils.toJson(jsonObject);
 
         //调用申请退款接口
         return post(REFUNDS, body);

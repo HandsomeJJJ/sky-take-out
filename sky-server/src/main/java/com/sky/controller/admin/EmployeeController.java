@@ -8,6 +8,7 @@ import com.sky.entity.Employee;
 import com.sky.properties.JwtProperties;
 import com.sky.result.PageResult;
 import com.sky.result.Result;
+import com.sky.security.TokenBlacklist;
 import com.sky.service.EmployeeService;
 import com.sky.utils.JwtUtil;
 import com.sky.vo.EmployeeLoginVO;
@@ -17,6 +18,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
+import javax.servlet.http.HttpServletRequest;
+import javax.validation.Valid;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -33,6 +36,8 @@ public class EmployeeController {
     private EmployeeService employeeService;
     @Autowired
     private JwtProperties jwtProperties;
+    @Autowired
+    private TokenBlacklist tokenBlacklist;
 
     /**
      * 登录
@@ -42,8 +47,8 @@ public class EmployeeController {
      */
     @PostMapping("/login")
     @ApiOperation(value = "员工登录")
-    public Result<EmployeeLoginVO> login(@RequestBody EmployeeLoginDTO employeeLoginDTO) {
-        log.info("员工登录：{}", employeeLoginDTO);
+    public Result<EmployeeLoginVO> login(@RequestBody @Valid EmployeeLoginDTO employeeLoginDTO) {
+        log.info("员工登录，用户名：{}", employeeLoginDTO.getUsername());
 
         Employee employee = employeeService.login(employeeLoginDTO);
 
@@ -70,9 +75,16 @@ public class EmployeeController {
      *
      * @return
      */
+    /**
+     * 退出。JWT 无法从服务端删除，因此把当前令牌登记进黑名单，
+     * 否则 logout 之后原令牌在有效期内依然可用。
+     */
     @PostMapping("/logout")
     @ApiOperation("员工退出")
-    public Result<String> logout() {
+    public Result<String> logout(HttpServletRequest request) {
+        String token = request.getHeader(jwtProperties.getAdminTokenName());
+        tokenBlacklist.revoke(token, jwtProperties.getAdminTtl());
+        log.info("员工登出，令牌已加入黑名单");
         return Result.success();
     }
 
@@ -83,8 +95,8 @@ public class EmployeeController {
      */
     @PostMapping
     @ApiOperation("新增员工")
-    public Result save(@RequestBody EmployeeDTO employeeDTO){
-        log.info("新增员工：{}",employeeDTO);
+    public Result save(@RequestBody @Valid EmployeeDTO employeeDTO){
+        log.info("新增员工：{}", employeeDTO.getUsername());
         employeeService.save(employeeDTO);
         return Result.success();
     }
@@ -135,7 +147,7 @@ public class EmployeeController {
      */
     @PutMapping
     @ApiOperation("编辑员工信息")
-    public Result update(@RequestBody EmployeeDTO employeeDTO){
+    public Result update(@RequestBody @Valid EmployeeDTO employeeDTO){
         log.info("编辑员工信息：{}", employeeDTO);
         employeeService.update(employeeDTO);
         return Result.success();

@@ -24,9 +24,12 @@ public interface OrderService {
 
     /**
      * 支付成功，修改订单状态
-     * @param outTradeNo
+     *
+     * @param outTradeNo    商户订单号
+     * @param tradeState    微信交易状态，仅 SUCCESS 入账
+     * @param paidAmountFen 回调报文中的实付金额（分），与订单应付金额不一致时拒绝
      */
-    void paySuccess(String outTradeNo);
+    void paySuccess(String outTradeNo, String tradeState, Integer paidAmountFen);
 
     /**
      * 用户端订单分页查询
@@ -38,11 +41,18 @@ public interface OrderService {
     PageResult pageQuery4User(int page, int pageSize, Integer status);
 
     /**
-     * 查询订单详情
+     * 查询订单详情（管理端）
      * @param id
      * @return
      */
     OrderVO details(Long id);
+
+    /**
+     * 查询订单详情（用户端，按当前登录用户限定）
+     * @param id
+     * @return
+     */
+    OrderVO userOrderDetails(Long id);
 
     /**
      * 用户取消订单

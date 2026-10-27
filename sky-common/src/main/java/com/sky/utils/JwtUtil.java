@@ -1,17 +1,29 @@
 package com.sky.utils;
 
 import io.jsonwebtoken.Claims;
-import io.jsonwebtoken.JwtBuilder;
+import io.jsonwebtoken.JwtParser;
 import io.jsonwebtoken.Jwts;
-import io.jsonwebtoken.SignatureAlgorithm;
+import io.jsonwebtoken.security.Keys;
+
+import javax.crypto.SecretKey;
 import java.nio.charset.StandardCharsets;
 import java.util.Date;
 import java.util.Map;
 
+/**
+ * JWT 工具类（jjwt 0.12 API）。
+ */
 public class JwtUtil {
+
+    /** HS256 要求密钥不短于 256 bit，即至少 32 个字符 */
+    private static final int MIN_SECRET_BYTES = 32;
+
+    /** 签发方标识，解析时必须匹配，避免拿到别处签发的同算法 token 也能通过 */
+    private static final String ISSUER = "sky-take-out";
+
     /**
      * 生成jwt
-     * 使用Hs256算法, 私匙使用固定秘钥
+     * 使用Hs256算法
      *
      * @param secretKey jwt秘钥
      * @param ttlMillis jwt过期时间(毫秒)
@@ -19,23 +31,16 @@ public class JwtUtil {
      * @return
      */
     public static String createJWT(String secretKey, long ttlMillis, Map<String, Object> claims) {
-        // 指定签名的时候使用的签名算法，也就是header那部分
-        SignatureAlgorithm signatureAlgorithm = SignatureAlgorithm.HS256;
+        SecretKey key = signingKey(secretKey);
 
-        // 生成JWT的时间
-        long expMillis = System.currentTimeMillis() + ttlMillis;
-        Date exp = new Date(expMillis);
-
-        // 设置jwt的body
-        JwtBuilder builder = Jwts.builder()
-                // 如果有私有声明，一定要先设置这个自己创建的私有的声明，这个是给builder的claim赋值，一旦写在标准的声明赋值之后，就是覆盖了那些标准的声明的
-                .setClaims(claims)
-                // 设置签名使用的签名算法和签名使用的秘钥
-                .signWith(signatureAlgorithm, secretKey.getBytes(StandardCharsets.UTF_8))
-                // 设置过期时间
-                .setExpiration(exp);
-
-        return builder.compact();
+        long now = System.currentTimeMillis();
+        return Jwts.builder()
+                .claims(claims)
+                .issuer(ISSUER)
+                .issuedAt(new Date(now))
+                .expiration(new Date(now + ttlMillis))
+                .signWith(key, Jwts.SIG.HS256)
+                .compact();
     }
 
     /**
@@ -46,13 +51,24 @@ public class JwtUtil {
      * @return
      */
     public static Claims parseJWT(String secretKey, String token) {
-        // 得到DefaultJwtParser
-        Claims claims = Jwts.parser()
-                // 设置签名的秘钥
-                .setSigningKey(secretKey.getBytes(StandardCharsets.UTF_8))
-                // 设置需要解析的jwt
-                .parseClaimsJws(token).getBody();
-        return claims;
+        JwtParser parser = Jwts.parser()
+                .requireIssuer(ISSUER)
+                .verifyWith(signingKey(secretKey))
+                .build();
+        return parser.parseSignedClaims(token).getPayload();
+    }
+
+    /**
+     * 密钥长度不足时直接抛错，不做静默降级：签名密钥一旦过短就可以被字典穷举，
+     * 任何持有一个 token 的人都能仿造同算法的新 token。
+     */
+    private static SecretKey signingKey(String secretKey) {
+        byte[] bytes = secretKey == null ? new byte[0] : secretKey.getBytes(StandardCharsets.UTF_8);
+        if (bytes.length < MIN_SECRET_BYTES) {
+            throw new IllegalStateException("JWT 签名密钥长度不足：需要至少 " + MIN_SECRET_BYTES
+                    + " 字节（当前 " + bytes.length + "），请通过环境变量注入足够长的随机密钥");
+        }
+        return Keys.hmacShaKeyFor(bytes);
     }
 
 }

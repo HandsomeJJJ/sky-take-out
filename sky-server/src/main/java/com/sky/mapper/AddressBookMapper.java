@@ -34,6 +34,23 @@ public interface AddressBookMapper {
     AddressBook getById(Long id);
 
     /**
+     * 按 id + userId 查询：地址簿含手机号与住址，只能取当前用户自己的
+     */
+    @Select("select * from address_book where id = #{id} and user_id = #{userId}")
+    AddressBook getByIdAndUserId(@Param("id") Long id, @Param("userId") Long userId);
+
+    /**
+     * 按 id + userId 更新，返回影响行数：0 表示这条地址不属于当前用户
+     */
+    void updateByIdAndUserId(AddressBook addressBook);
+
+    /**
+     * 按 id + userId 删除，返回影响行数
+     */
+    @Delete("delete from address_book where id = #{id} and user_id = #{userId}")
+    int deleteByIdAndUserId(@Param("id") Long id, @Param("userId") Long userId);
+
+    /**
      * 根据id修改
      * @param addressBook
      */

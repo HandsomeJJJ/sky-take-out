@@ -26,6 +26,8 @@ public class MqMessage implements Serializable {
     public static final int SENT = 1;
     /** 超过重试上限，死亡待人工处理 */
     public static final int DEAD = 2;
+    /** 已被某个实例认领、正在发送 */
+    public static final int SENDING = 3;
 
     private Long id;
 
@@ -38,7 +40,7 @@ public class MqMessage implements Serializable {
     /** 消息体 JSON */
     private String payload;
 
-    /** 状态：0 待发送 1 已发送 2 死亡 */
+    /** 状态：0 待发送 1 已发送 2 死亡 3 发送中 */
     private Integer status;
 
     /** 已重试次数 */

@@ -17,7 +17,8 @@ public class OssConfiguration {
     @Bean
     @ConditionalOnMissingBean
     public AliOssUtil aliOssUtil(AliOssProperties aliOssProperties){
-        log.info("开始创建阿里云文件上传工具类对象：{}",aliOssProperties);
+        // 不要打印 properties 对象：里面有 AccessKeySecret
+        log.info("开始创建阿里云文件上传工具类对象，bucket={}", aliOssProperties.getBucketName());
         return new AliOssUtil(aliOssProperties.getEndpoint(),
                 aliOssProperties.getAccessKeyId(),
                 aliOssProperties.getAccessKeySecret(),

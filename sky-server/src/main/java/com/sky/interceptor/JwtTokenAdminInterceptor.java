@@ -3,6 +3,7 @@ package com.sky.interceptor;
 import com.sky.constant.JwtClaimsConstant;
 import com.sky.context.BaseContext;
 import com.sky.properties.JwtProperties;
+import com.sky.security.TokenBlacklist;
 import com.sky.utils.JwtUtil;
 import io.jsonwebtoken.Claims;
 import lombok.extern.slf4j.Slf4j;
@@ -22,6 +23,8 @@ public class JwtTokenAdminInterceptor implements HandlerInterceptor {
 
     @Autowired
     private JwtProperties jwtProperties;
+    @Autowired
+    private TokenBlacklist tokenBlacklist;
 
     /**
      * 校验jwt
@@ -44,16 +47,28 @@ public class JwtTokenAdminInterceptor implements HandlerInterceptor {
 
         //2、校验令牌
         try {
-            log.info("jwt校验:{}", token);
+            // 完整令牌等价于登录凭证，落日志等于把凭证写进日志系统；只记录是否存在
+            log.info("jwt校验，token是否存在：{}", token != null);
+            if (tokenBlacklist.isRevoked(token)) {
+                log.warn("令牌已登出，拒绝访问");
+                response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+                return false;
+            }
             Claims claims = JwtUtil.parseJWT(jwtProperties.getAdminSecretKey(), token);
-            Long empId = Long.valueOf(claims.get(JwtClaimsConstant.EMP_ID).toString());
-            log.info("当前员工id：", empId);
-            BaseContext.setCurrentId(empId);
+            Object empId = claims.get(JwtClaimsConstant.EMP_ID);
+            if (empId == null) {
+                log.warn("令牌缺少 empId 声明");
+                response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+                return false;
+            }
+            log.info("当前员工id：{}", empId);
+            BaseContext.setCurrentId(Long.valueOf(empId.toString()));
             //3、通过，放行
             return true;
         } catch (Exception ex) {
             //4、不通过，响应401状态码
-            response.setStatus(401);
+            log.warn("jwt校验失败：{}", ex.getMessage());
+            response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
             return false;
         }
     }

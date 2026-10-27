@@ -21,6 +21,14 @@ import java.util.List;
 @Slf4j
 public class OrderTask {
 
+    /**
+     * 判定基准是下单时间（order_time），不是进入派送中的时间：
+     * 下单超过这个时长还停在派送中，就按"当天未闭环订单"收尾。
+     */
+    private static final int STALE_MINUTES = 60;
+    /** 单次扫描上限，避免积压时把整表读进内存 */
+    private static final int BATCH_LIMIT = 500;
+
     private final OrderMapper orderMapper;
     private final RedisLock redisLock;
 
@@ -50,15 +58,18 @@ public class OrderTask {
     private void doProcess() {
         log.info("定时处理处于派送中的订单：{}", LocalDateTime.now());
 
-        LocalDateTime time = LocalDateTime.now().plusMinutes(-60);
+        LocalDateTime time = LocalDateTime.now().minusMinutes(STALE_MINUTES);
 
-        List<Orders> ordersList = orderMapper.getByStatusAndOrderTimeLT(Orders.DELIVERY_IN_PROGRESS, time);
+        List<Orders> ordersList = orderMapper.getByStatusAndOrderTimeLT(
+                Orders.DELIVERY_IN_PROGRESS, time, BATCH_LIMIT);
 
-        if (ordersList != null && ordersList.size() > 0) {
-            for (Orders orders : ordersList) {
-                orders.setStatus(Orders.COMPLETED);
-                orderMapper.update(orders);
-            }
+        int completed = 0;
+        for (Orders orders : ordersList) {
+            // 带前置状态的条件更新：全字段 update 会把用户在这期间改过的字段一起覆盖掉，
+            // 而且和"用户点完成/商家派送"并发时会互相盖掉对方的状态
+            completed += orderMapper.completeByIdAndExpectedStatus(orders.getId(),
+                    Orders.DELIVERY_IN_PROGRESS, Orders.COMPLETED, LocalDateTime.now());
         }
+        log.info("派送超时订单处理完成，扫描={}，实际完成={}", ordersList.size(), completed);
     }
 }

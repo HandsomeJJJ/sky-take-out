@@ -6,17 +6,60 @@ spring:
     active: dev
   main:
     allow-circular-references: true
+  servlet:
+    multipart:
+      # 容器级上限，给业务校验兜一层
+      max-file-size: 5MB
+      max-request-size: 10MB
   datasource:
     druid:
-      driver-class-name: ${sky.datasource.driver-class-name}
-      url: jdbc:mysql://${sky.datasource.host}:${sky.datasource.port}/${sky.datasource.database}?serverTimezone=Asia/Shanghai&useUnicode=true&characterEncoding=utf-8&zeroDateTimeBehavior=convertToNull&useSSL=false&allowPublicKeyRetrieval=true
+      driver-class-name: com.mysql.cj.jdbc.Driver
+      # connectTimeout/socketTimeout 必须显式给：MySQL 卡住时没有超时会把 Tomcat 线程全挂住
+      url: jdbc:mysql://${sky.datasource.host}:${sky.datasource.port}/${sky.datasource.database}?serverTimezone=Asia/Shanghai&useUnicode=true&characterEncoding=utf-8&zeroDateTimeBehavior=convertToNull&useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=3000&socketTimeout=10000
       username: ${sky.datasource.username}
       password: ${sky.datasource.password}
+      # Druid 默认 maxActive=8、maxWait=-1（拿不到连接就无限等），生产必须显式配置
+      initial-size: 5
+      min-idle: 5
+      max-active: 20
+      max-wait: 3000
+      validation-query: SELECT 1
+      test-while-idle: true
+      test-on-borrow: false
+      test-on-return: false
+      keep-alive: true
+      time-between-eviction-runs-millis: 60000
+      min-evictable-idle-time-millis: 300000
+      # 监控页默认关闭：/druid 一旦开着就是SQL与会话泄露
+      stat-view-servlet:
+        enabled: false
   redis:
     host: ${sky.redis.host}
     port: ${sky.redis.port}
     password: ${sky.redis.password}
     database: ${sky.redis.database}
+    timeout: 3000ms
+    connect-timeout: 3000ms
+    lettuce:
+      pool:
+        max-active: 16
+        max-idle: 8
+        min-idle: 2
+        # 池满时最多等 2 秒就报错，不要无限等
+        max-wait: 2000ms
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    # 已有数据的库第一次接入时直接打基线，不试图重建表
+    baseline-on-migrate: true
+    baseline-version: 0
+
+  task:
+    scheduling:
+      # @Scheduled 默认单线程池：一个任务卡住（慢 SQL、MQ 超时）会把其它定时任务全部拖死
+      pool:
+        size: 4
+      thread-name-prefix: sky-sched-
 
 mybatis:
   #mapper配置文件
@@ -33,9 +76,10 @@ logging:
   level:
     com:
       sky:
-        mapper: debug
         service: info
         controller: info
+        # mapper 的 SQL 日志在 application-dev.yml 里按 profile 打开：
+        # 放在这里会对所有 profile 生效，把手机号、住址、订单金额全打进制品日志
 
 # Actuator：暴露 health/info 供 docker healthcheck 与监控使用
 management:
@@ -45,34 +89,57 @@ management:
         include: health,info
   endpoint:
     health:
-      show-details: always
+      # always 会把数据库/Redis 主机名与版本吐给任何能访问 /actuator/health 的人
+      show-details: never
 
 sky:
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    host: ${DB_HOST:localhost}
+    port: ${DB_PORT:3306}
+    database: ${DB_DATABASE:sky_take_out}
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD}
+  redis:
+    host: ${REDIS_HOST:localhost}
+    port: ${REDIS_PORT:6379}
+    password: ${REDIS_PASSWORD:}
+    database: ${REDIS_DATABASE:10}
   jwt:
-    # 签名密钥走环境变量：密钥泄露 = 任何人都能伪造 token
-    admin-secret-key: ${JWT_ADMIN_SECRET_KEY:itcast}
+    # 签名密钥只从环境变量读取，不给默认值：
+    # 带默认值时密钥泄露/未配置会静默降级成可被字典穷举的弱密钥
+    admin-secret-key: ${JWT_ADMIN_SECRET_KEY}
     # 设置jwt过期时间
     admin-ttl: 7200000
     # 设置前端传递过来的令牌名称
     admin-token-name: token
-    user-secret-key: ${JWT_USER_SECRET_KEY:itheima}
+    user-secret-key: ${JWT_USER_SECRET_KEY}
     user-ttl: 7200000
     user-token-name: authentication
+  # 这些键以前写成 ${sky.alioss.endpoint} 自引用，只有 dev 定义过值；
+  # 换 profile（docker）时占位符解析成自身 -> 循环引用或直接失败。
+  # 改成"环境变量 + 默认值"单点定义，profile 只需要覆盖确实不同的部分。
   alioss:
-    endpoint: ${sky.alioss.endpoint}
-    access-key-id: ${sky.alioss.access-key-id}
-    access-key-secret: ${sky.alioss.access-key-secret}
-    bucket-name: ${sky.alioss.bucket-name}
+    endpoint: ${ALIOSS_ENDPOINT:oss-cn-beijing.aliyuncs.com}
+    access-key-id: ${ALIOSS_ACCESS_KEY_ID:your-access-key-id}
+    access-key-secret: ${ALIOSS_ACCESS_KEY_SECRET:your-access-key-secret}
+    bucket-name: ${ALIOSS_BUCKET_NAME:your-bucket-name}
   wechat:
-    appid: ${sky.wechat.appid}
-    secret: ${sky.wechat.secret}
-    mchid : ${sky.wechat.mchid}
-    mchSerialNo: ${sky.wechat.mchSerialNo}
-    privateKeyFilePath: ${sky.wechat.privateKeyFilePath}
-    apiV3Key: ${sky.wechat.apiV3Key}
-    weChatPayCertFilePath: ${sky.wechat.weChatPayCertFilePath}
-    notifyUrl: ${sky.wechat.notifyUrl}
-    refundNotifyUrl: ${sky.wechat.refundNotifyUrl}
+    appid: ${WECHAT_APPID:your-appid}
+    secret: ${WECHAT_SECRET:your-secret}
+    mchid: ${WECHAT_MCHID:your-mchid}
+    mchSerialNo: ${WECHAT_MCH_SERIAL_NO:your-mch-serial-no}
+    privateKeyFilePath: ${WECHAT_PRIVATE_KEY_PATH:}
+    apiV3Key: ${WECHAT_API_V3_KEY:your-api-v3-key}
+    weChatPayCertFilePath: ${WECHAT_PAY_CERT_PATH:}
+    notifyUrl: ${WECHAT_NOTIFY_URL:https://your-domain/notify/paySuccess}
+    refundNotifyUrl: ${WECHAT_REFUND_NOTIFY_URL:https://your-domain/notify/refundSuccess}
+  upload:
+    # 业务侧允许的单个文件大小（KB）
+    max-size-kb: ${UPLOAD_MAX_SIZE_KB:2048}
+  snowflake:
+    # 集群必须给每个实例下发不同值，否则同一毫秒会生成相同订单号
+    worker-id: ${SNOWFLAKE_WORKER_ID:1}
   shop:
     address: 北京市海淀区上地十街10号
   baidu:

@@ -7,6 +7,7 @@ import com.sky.entity.Orders;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
+import org.apache.ibatis.annotations.Update;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
@@ -54,6 +55,36 @@ public interface OrderMapper {
     Orders getById(Long id);
 
     /**
+     * 按 id + userId 查询订单：用户端所有订单操作都必须用它，
+     * 只按 id 查等于把"订单归属"交给客户端自觉，可以遍历 id 看/改别人的订单。
+     */
+    @Select("select * from orders where id = #{id} and user_id = #{userId}")
+    Orders getByIdAndUserId(@Param("id") Long id, @Param("userId") Long userId);
+
+    /**
+     * 支付回调专用：只允许"待支付且未支付"的订单入账。
+     * 微信会重复推送，条件更新保证只有一个请求能改成功，不需要额外的锁。
+     * 必须同时限定 status = 1：超时任务取消的订单 pay_status 仍是 0，
+     * 只判 pay_status 会让一笔迟到支付把已取消订单直接改回待接单。
+     */
+    @Update("update orders set status = 2, pay_status = 1, checkout_time = #{checkoutTime} " +
+            "where number = #{number} and pay_status = 0 and status = 1")
+    int markPaidByNumber(@Param("number") String number, @Param("checkoutTime") LocalDateTime checkoutTime);
+
+    /**
+     * 取消订单（乐观锁）：仅当状态仍是 expectedStatus 才生效，同时写入取消/拒单原因与支付状态。
+     * 返回 0 表示订单已被其他人改过状态，调用方按"状态错误"处理。
+     */
+    @Update("update orders set status = 6, cancel_reason = #{cancelReason}, rejection_reason = #{rejectionReason}, " +
+            "cancel_time = #{cancelTime}, pay_status = #{payStatus} " +
+            "where id = #{id} and status = #{expectedStatus}")
+    int cancelIfStatusMatches(@Param("id") Long id, @Param("expectedStatus") Integer expectedStatus,
+                              @Param("cancelReason") String cancelReason,
+                              @Param("rejectionReason") String rejectionReason,
+                              @Param("cancelTime") LocalDateTime cancelTime,
+                              @Param("payStatus") Integer payStatus);
+
+    /**
      * 根据状态统计订单数量
      * @param status
      */
@@ -66,8 +97,15 @@ public interface OrderMapper {
      * @param orderTime
      * @return
      */
-    @Select("select * from orders where status = #{status} and order_time < #{orderTime}")
-    List<Orders> getByStatusAndOrderTimeLT(Integer status, LocalDateTime orderTime);
+    /**
+     * 按状态与时间扫描待处理订单。必须带 limit：不加上限时一次全表扫描会把
+     * 所有积压订单装进内存，并且这个查询每分钟都在跑。
+     */
+    @Select("select * from orders where status = #{status} and order_time < #{orderTime} " +
+            "order by order_time asc limit #{limit}")
+    List<Orders> getByStatusAndOrderTimeLT(@Param("status") Integer status,
+                                           @Param("orderTime") LocalDateTime orderTime,
+                                           @Param("limit") int limit);
 
     /**
      * 仅取消待支付订单。status 条件使消息重复投递时仍然幂等。

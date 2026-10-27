@@ -15,6 +15,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
+import javax.validation.Valid;
+
 @RestController("userOrderController")
 @RequestMapping("/user/order")
 @Api(tags = "用户端订单相关接口")
@@ -32,8 +34,8 @@ public class OrderController {
     @PostMapping("/submit")
     @ApiOperation("用户下单")
     @RateLimit(limit = 5, window = 10, key = "orderSubmit") // 10秒最多5次下单，防刷
-    public Result<OrderSubmitVO> submit(@RequestBody OrdersSubmitDTO ordersSubmitDTO){
-        log.info("用户下单，参数为：{}",ordersSubmitDTO);
+    public Result<OrderSubmitVO> submit(@RequestBody @Valid OrdersSubmitDTO ordersSubmitDTO){
+        log.info("用户下单，地址id={}，付款方式={}", ordersSubmitDTO.getAddressBookId(), ordersSubmitDTO.getPayMethod());
         OrderSubmitVO orderSubmitVO = orderService.submitOrder(ordersSubmitDTO);
         return Result.success(orderSubmitVO);
     }
@@ -46,7 +48,7 @@ public class OrderController {
      */
     @PutMapping("/payment")
     @ApiOperation("订单支付")
-    public Result<OrderPaymentVO> payment(@RequestBody OrdersPaymentDTO ordersPaymentDTO) throws Exception {
+    public Result<OrderPaymentVO> payment(@RequestBody @Valid OrdersPaymentDTO ordersPaymentDTO) throws Exception {
         log.info("订单支付：{}", ordersPaymentDTO);
         OrderPaymentVO orderPaymentVO = orderService.payment(ordersPaymentDTO);
         log.info("生成预支付交易单：{}", orderPaymentVO);
@@ -63,7 +65,9 @@ public class OrderController {
      */
     @GetMapping("/historyOrders")
     @ApiOperation("历史订单查询")
-    public Result<PageResult> page(int page, int pageSize, Integer status) {
+    public Result<PageResult> page(@RequestParam(defaultValue = "1") int page,
+                               @RequestParam(defaultValue = "10") int pageSize,
+                               Integer status) {
         PageResult pageResult = orderService.pageQuery4User(page, pageSize, status);
         return Result.success(pageResult);
     }
@@ -77,7 +81,7 @@ public class OrderController {
     @GetMapping("/orderDetail/{id}")
     @ApiOperation("查询订单详情")
     public Result<OrderVO> details(@PathVariable("id") Long id) {
-        OrderVO orderVO = orderService.details(id);
+        OrderVO orderVO = orderService.userOrderDetails(id);
         return Result.success(orderVO);
     }
 

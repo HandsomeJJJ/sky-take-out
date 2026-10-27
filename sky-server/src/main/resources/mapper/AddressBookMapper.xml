@@ -17,8 +17,7 @@
         </where>
     </select>
 
-    <update id="update" parameterType="addressBook">
-        update address_book
+    <sql id="updateSetClause">
         <set>
             <if test="consignee != null">
                 consignee = #{consignee},
@@ -39,7 +38,19 @@
                 is_default = #{isDefault},
             </if>
         </set>
+    </sql>
+
+    <update id="update" parameterType="addressBook">
+        update address_book
+        <include refid="updateSetClause"/>
         where id = #{id}
+    </update>
+
+    <!-- 用户端改地址必须同时按 user_id 限定，影响行数为 0 表示这条地址不是他的 -->
+    <update id="updateByIdAndUserId" parameterType="addressBook">
+        update address_book
+        <include refid="updateSetClause"/>
+        where id = #{id} and user_id = #{userId}
     </update>
 
 </mapper>

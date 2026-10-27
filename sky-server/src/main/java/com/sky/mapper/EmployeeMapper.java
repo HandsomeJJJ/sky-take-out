@@ -7,7 +7,10 @@ import com.sky.entity.Employee;
 import com.sky.enumeration.OperationType;
 import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
+import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
+import org.apache.ibatis.annotations.Update;
+import org.apache.ibatis.annotations.Update;
 
 @Mapper
 public interface EmployeeMapper {
@@ -51,4 +54,10 @@ public interface EmployeeMapper {
      */
     @Select("select * from employee where id = #{id}")
     Employee getById(Long id);
+
+    /**
+     * 仅更新密码列，用于把历史无盐 MD5 就地升级为 BCrypt
+     */
+    @Update("update employee set password = #{password} where id = #{id}")
+    void updatePasswordById(@Param("id") Long id, @Param("password") String password);
 }

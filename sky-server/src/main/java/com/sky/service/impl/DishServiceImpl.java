@@ -9,6 +9,7 @@ import com.sky.dto.DishPageQueryDTO;
 import com.sky.entity.Dish;
 import com.sky.entity.DishFlavor;
 import com.sky.entity.Setmeal;
+import com.sky.exception.BaseException;
 import com.sky.exception.DeletionNotAllowedException;
 import com.sky.mapper.DishFlavorMapper;
 import com.sky.mapper.DishMapper;
@@ -84,12 +85,15 @@ public class DishServiceImpl implements DishService {
      *
      * @param ids
      */
-    @Transactional
+    @Transactional(rollbackFor = Exception.class)
     public void deleteBatch(List<Long> ids) {
         //判断当前菜品是否能够删除---是否存在起售中的菜品？？
         for (Long id : ids) {
             Dish dish = dishMapper.getById(id);
-            if (dish.getStatus() == StatusConstant.ENABLE) {
+            if (dish == null) {
+                throw new DeletionNotAllowedException("菜品不存在");
+            }
+            if (StatusConstant.ENABLE.equals(dish.getStatus())) {
                 //当前菜品处于起售中，不能删除
                 throw new DeletionNotAllowedException(MessageConstant.DISH_ON_SALE);
             }
@@ -119,6 +123,9 @@ public class DishServiceImpl implements DishService {
     public DishVO getByIdWithFlavor(Long id) {
         //根据id查询菜品数据
         Dish dish = dishMapper.getById(id);
+        if (dish == null) {
+            throw new BaseException("菜品不存在");
+        }
 
         //根据菜品id查询口味数据
         List<DishFlavor> dishFlavors = dishFlavorMapper.getByDishId(id);
@@ -136,6 +143,7 @@ public class DishServiceImpl implements DishService {
      *
      * @param dishDTO
      */
+    @Transactional(rollbackFor = Exception.class)
     public void updateWithFlavor(DishDTO dishDTO) {
         Dish dish = new Dish();
         BeanUtils.copyProperties(dishDTO, dish);
@@ -163,7 +171,7 @@ public class DishServiceImpl implements DishService {
      * @param status
      * @param id
      */
-    @Transactional
+    @Transactional(rollbackFor = Exception.class)
     public void startOrStop(Integer status, Long id) {
         Dish dish = Dish.builder()
                 .id(id)
@@ -171,7 +179,7 @@ public class DishServiceImpl implements DishService {
                 .build();
         dishMapper.update(dish);
 
-        if (status == StatusConstant.DISABLE) {
+        if (StatusConstant.DISABLE.equals(status)) {
             // 如果是停售操作，还需要将包含当前菜品的套餐也停售
             List<Long> dishIds = new ArrayList<>();
             dishIds.add(id);

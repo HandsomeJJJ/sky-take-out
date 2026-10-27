@@ -21,13 +21,29 @@ public interface MqMessageMapper {
     @Select("select * from mq_message where status = #{status} and next_retry_time <= now() order by id asc limit #{limit}")
     List<MqMessage> listPending(@Param("status") int status, @Param("limit") int limit);
 
-    /** 标记已发送：status 条件保证并发下只成功一次 */
-    @Update("update mq_message set status = 1, update_time = now() where id = #{id} and status = 0")
+    /**
+     * 认领：把待发送记录原子地占为"发送中"。
+     * 集群里多个实例扫到同一批记录时，只有一个实例的 update 影响行数是 1，
+     * 其余实例直接跳过 —— 没有这一步，每条消息会被投递 N 次（N = 实例数）。
+     */
+    @Update("update mq_message set status = 3, update_time = now() where id = #{id} and status = 0")
+    int claim(@Param("id") Long id);
+
+    /**
+     * 回收卡死的"发送中"记录：持有者进程崩溃后没人把它改回去，
+     * 超过阈值就退回待发送，否则这条消息永远不会再被补偿。
+     */
+    @Update("update mq_message set status = 0, next_retry_time = now(), update_time = now() " +
+            "where status = 3 and update_time < #{staleBefore}")
+    int reclaimStuck(@Param("staleBefore") LocalDateTime staleBefore);
+
+    /** 标记已发送：只接受"发送中"的记录，保证认领者才能收尾 */
+    @Update("update mq_message set status = 1, update_time = now() where id = #{id} and status = 3")
     int markSent(@Param("id") Long id);
 
-    /** 发送失败：重试次数 +1，退避到 nextRetryTime */
-    @Update("update mq_message set retry_count = retry_count + 1, next_retry_time = #{nextRetryTime}, update_time = now() " +
-            "where id = #{id}")
+    /** 发送失败：退回待发送、重试次数 +1、退避到 nextRetryTime */
+    @Update("update mq_message set status = 0, retry_count = retry_count + 1, next_retry_time = #{nextRetryTime}, " +
+            "update_time = now() where id = #{id} and status = 3")
     int incrRetry(@Param("id") Long id, @Param("nextRetryTime") LocalDateTime nextRetryTime);
 
     /** 超过重试上限，标记死亡待人工处理 */

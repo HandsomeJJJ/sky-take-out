@@ -14,6 +14,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.web.bind.annotation.*;
 
+import javax.validation.Valid;
+
 import java.util.List;
 
 /**
@@ -38,7 +40,7 @@ public class DishController {
     @ApiOperation("新增菜品")
     // 只影响该分类的菜品列表，精确清理
     @CacheEvict(cacheNames = "dishCache", key = "#dishDTO.categoryId")
-    public Result save(@RequestBody DishDTO dishDTO) {
+    public Result save(@RequestBody @Valid DishDTO dishDTO) {
         log.info("新增菜品：{}", dishDTO);
         dishService.saveWithFlavor(dishDTO);
         return Result.success();
@@ -97,7 +99,7 @@ public class DishController {
     @ApiOperation("修改菜品")
     // 菜品分类可能变更，且套餐详情内含菜品信息，两个缓存都要清
     @CacheEvict(cacheNames = {"dishCache", "setmealDishCache"}, allEntries = true)
-    public Result update(@RequestBody DishDTO dishDTO) {
+    public Result update(@RequestBody @Valid DishDTO dishDTO) {
         log.info("修改菜品：{}", dishDTO);
         dishService.updateWithFlavor(dishDTO);
         return Result.success();

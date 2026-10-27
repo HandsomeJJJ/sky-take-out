@@ -40,6 +40,24 @@
             <scope>compile</scope>
         </dependency>
 
+        <!-- Bean Validation：Controller 入参校验，替代手写 if 判空 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+
+        <!-- Lettuce 连接池需要 commons-pool2，否则 lettuce.pool.* 配置不生效 -->
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-pool2</artifactId>
+        </dependency>
+
+        <!-- Flyway：数据库版本化，避免 docker compose 起来是个空库 -->
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+        </dependency>
+
         <!-- Actuator：健康检查与监控端点，供 docker healthcheck 使用 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -60,11 +78,6 @@
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
-        </dependency>
-
-        <dependency>
-            <groupId>com.alibaba</groupId>
-            <artifactId>fastjson</artifactId>
         </dependency>
 
         <dependency>
@@ -101,7 +114,7 @@
         <dependency>
             <groupId>org.redisson</groupId>
             <artifactId>redisson-spring-boot-starter</artifactId>
-            <version>3.17.7</version>
+            <version>${redisson}</version>
         </dependency>
 
         <dependency>

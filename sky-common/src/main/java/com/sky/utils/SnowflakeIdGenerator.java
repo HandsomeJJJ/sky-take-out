@@ -21,12 +21,22 @@ public class SnowflakeIdGenerator {
     private long sequence = 0L;
     private long lastTimestamp = -1L;
 
-    private static class Holder {
-        private static final SnowflakeIdGenerator INSTANCE = new SnowflakeIdGenerator(1L);
-    }
+    /** 未显式配置时的机器号；集群里每个实例必须拿到不同的值 */
+    public static final long DEFAULT_WORKER_ID = 1L;
+
+    private static volatile SnowflakeIdGenerator instance = new SnowflakeIdGenerator(DEFAULT_WORKER_ID);
 
     public static SnowflakeIdGenerator getInstance() {
-        return Holder.INSTANCE;
+        return instance;
+    }
+
+    /**
+     * 在应用启动时按部署环境注入 workerId。
+     * workerId 写死成同一个值时，多个实例在同一毫秒会生成完全相同的 ID，
+     * 订单号唯一性就只剩"概率上不会撞上"，而不是约束。
+     */
+    public static synchronized void configure(long workerId) {
+        instance = new SnowflakeIdGenerator(workerId);
     }
 
     public SnowflakeIdGenerator(long workerId) {

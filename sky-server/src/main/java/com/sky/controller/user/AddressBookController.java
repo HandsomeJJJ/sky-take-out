@@ -8,6 +8,8 @@ import io.swagger.annotations.Api;
 import io.swagger.annotations.ApiOperation;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
+
+import javax.validation.Valid;
 import java.util.List;
 
 @RestController
@@ -40,7 +42,7 @@ public class AddressBookController {
      */
     @PostMapping
     @ApiOperation("新增地址")
-    public Result save(@RequestBody AddressBook addressBook) {
+    public Result save(@RequestBody @Valid AddressBook addressBook) {
         addressBookService.save(addressBook);
         return Result.success();
     }
@@ -60,7 +62,7 @@ public class AddressBookController {
      */
     @PutMapping
     @ApiOperation("根据id修改地址")
-    public Result update(@RequestBody AddressBook addressBook) {
+    public Result update(@RequestBody @Valid AddressBook addressBook) {
         addressBookService.update(addressBook);
         return Result.success();
     }
@@ -73,7 +75,7 @@ public class AddressBookController {
      */
     @PutMapping("/default")
     @ApiOperation("设置默认地址")
-    public Result setDefault(@RequestBody AddressBook addressBook) {
+    public Result setDefault(@RequestBody @Valid AddressBook addressBook) {
         addressBookService.setDefault(addressBook);
         return Result.success();
     }
