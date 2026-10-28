@@ -6,7 +6,7 @@
 
 - 用户端：微信登录、菜品/套餐浏览、购物车、地址簿、下单、支付、订单查询与催单、订单通知（未读数/拉取/标记已读）。
 - 管理端：员工、分类、菜品、套餐、订单（接单/拒单/派送/完成/取消）、营业状态、数据报表与退款记录。
-- 通用能力：JWT 鉴权与登出/禁用即时失效、参数校验、全局异常、接口限流与登录防爆破、文件上传校验、Redis 缓存、WebSocket 新订单提醒（跨实例广播）、订单超时取消、退款申请-回调-补偿闭环。
+- 通用能力：JWT 鉴权与登出/禁用即时失效、参数校验、全局异常、滑动窗口限流与登录防爆破、文件上传校验与对象回收、Redis 缓存（抖动 TTL + 互斥回源）、WebSocket 新订单提醒（握手鉴权 + 跨实例广播）、订单超时取消、派送超时收尾、退款申请-回调-补偿闭环。
 
 ## 技术栈
 
@@ -29,10 +29,18 @@ Spring Boot 2.7、Java 17、MyBatis、MySQL 8、Redis（缓存 + Pub/Sub + Redis
 | 令牌失效 | 登出用 SHA-256 黑名单；禁用账号按员工记"作废时间点"并比对令牌 `iat`；两处增强校验在 Redis 故障时 fail-open |
 | 防爆破 | `@RateLimit` 未登录按客户端 IP 分桶，罩住两个登录接口；账号维度失败计数 5 次锁 15 分钟（账号不存在不计数） |
 | MQ 可靠送达 | 本地消息表 `mq_message` 与业务同事务写入；先认领再发送，拿到 broker 确认才标已发送；失败指数退避，超限进死亡态 |
-| 消费可靠性 | Rabbit 手动 ack，坏消息进死信队列；Kafka 显式建 topic、`acks=all` + 幂等生产者 |
-| 链路追踪 | traceId 进日志 MDC，并通过消息头 `sky-trace-id` 穿透到消费者线程 |
-| 缓存一致性 | Spring Cache + `TransactionAwareCacheManagerProxy`，删缓存延到事务提交之后，统一 60 分钟 TTL |
-| 数据库版本 | Flyway 管理 schema 与索引（V1 建表、V2 初始账号、V3 营业状态/退款/通知）；存量库补索引见 `sky-server/src/main/resources/db/legacy-indexes.sql` |
+| 发送路径 | 事务提交后**异步**投递（独立线程池，饱和就交给补偿任务），发送锁按 Rabbit / Kafka 两个通道拆开，互不阻塞 |
+| 消费可靠性 | Rabbit 手动 ack，坏消息进死信队列，**死信有消费者**：能识别的订单补做超时取消并通知用户，无论成败都 ack；Kafka 显式建 topic、`acks=all` + 幂等生产者，异常一律交回 `DefaultErrorHandler` 退避重试、用尽落 `order.created.DLT`，失败时先撤销去重标记 |
+| 超时兜底 | 延迟队列 + `OrderTimeoutFallbackTask` **双轨并存**（不再"MQ 开着就不扫"），取消走 `where status=1` 的条件更新，重复扫描影响 0 行 |
+| 链路追踪 | traceId 进日志 MDC，并通过消息头 `sky-trace-id` 穿透到消费者线程（异步发送与线程池也带 MDC） |
+| 缓存一致性 | Spring Cache + `TransactionAwareCacheManagerProxy`，删缓存延到事务提交之后；TTL 每个 key ±20% 随机抖动（防集中过期），读接口 `@Cacheable(sync=true)` + 互斥写器（防击穿），空值也缓存（防穿透） |
+| 限流 | Redis ZSET **滑动窗口**，清理/计数/写入/续期在一段 Lua 里原子完成；超限返回 **HTTP 429 + `Retry-After`**；维度为登录用户 `uid:` / 未登录客户端 `ip:` |
+| 报表口径 | 时间区间一律半开 `[begin 00:00, end+1 00:00)`（整点与跨日边界不再漏行）；逐日循环查询换成两条 `group by date(...)` 聚合，总用户数取起点存量 + 每日新增；销量 Top10 按 SKU id 分组 |
+| 派送超时 | 以 `delivery_start_time`（接单后点派送时写入）为判定基准，阈值 `sky.order.auto-complete-after-minutes` 可配；历史数据该列为空时回退按下单时间 |
+| 个人信息 | 员工列表 SQL 不取 `password` / `id_number`；实体与 DTO 的敏感字段 `@ToString.Exclude`，控制器日志只留 id 与用户名；SQL 日志只在 dev 开 |
+| 文件生命周期 | 上传即登记 `media_object`；商品不再引用时先查菜品/套餐/购物车/订单明细四张表的引用计数，都无引用才进待回收，再过保留期（默认 180 天）才真正调 OSS 删除；回收前二次确认、条件更新保证多实例只删一次 |
+| WebSocket | 管理端来单/催单广播，跨实例用 Redis Pub/Sub；**握手必须带管理端 JWT**（`ws://host/ws/{sid}?token=...`，要求验签通过且含 `empId`），鉴权器未注册时 fail-closed |
+| 数据库版本 | Flyway 管理 schema 与索引（V1 建表、V2 初始账号、V3 营业状态/退款/通知、V4 派送开始时间、V5 对象登记）；存量库补索引见 `sky-server/src/main/resources/db/legacy-indexes.sql` |
 
 ## 本地运行
 
@@ -74,8 +82,10 @@ sky-server  Controller、Service、Mapper、消息组件、拦截器与安全组
 ## 测试与 CI
 
 ```bash
-mvn test          # 73 条断言型用例：下单算价与复核、打烊/下架拦截、越权、支付回调幂等与迟到支付、
-                  # 退款幂等与补偿、状态变更通知、员工禁用即时失效、登录失败锁定、报表日期守卫、
+mvn test          # 123 条断言型用例：下单算价与复核、打烊/下架拦截、越权、支付回调幂等与迟到支付、
+                  # 退款幂等与补偿、状态变更通知、员工禁用即时失效、登录失败锁定、报表日期守卫与聚合口径、
+                  # 缓存 TTL 抖动、滑动窗口限流与 429、死信补做与必 ack、Kafka 失败不吞消息、
+                  # 图片回收的引用计数、WebSocket 握手鉴权、菜品口味批量查询、
                   # BCrypt、元转分、JSON 往返精度
 ```
 
@@ -88,11 +98,17 @@ CI（`.github/workflows/ci.yml`）会额外断言编译产物是 Java 17 字节�
 
 ## 已知边界
 
+- **所有验证都停在单元级**：123 条用例全是 Mockito，没有起过 MySQL / Redis / RabbitMQ / Kafka，
+  V1~V5 迁移与新增索引**未在真实库上执行过**；滑动窗口 Lua、`sync=true` 的互斥、死信补做、
+  429 端到端、导出文件能否被 Excel 打开，都属于"代码与单测自洽"，不是实测结论。
 - 微信支付走真实商户接口，本仓库未在沙箱完成端到端联调；回调验签、金额校验、退款幂等与补偿的逻辑有单测覆盖。
-- 限流仍是固定窗口（窗口边界可放行 2 倍流量），超限返回 `200 + code=0` 而不是 429 + `Retry-After`。
-- 缓存只有 TTL，没有互斥重建/逻辑过期（热点 key 过期瞬间会击穿），TTL 也没做抖动。
-- RabbitMQ 的死信队列目前没有消费者与告警；MQ 启用时超时兜底任务不创建，坏消息会停在 DLQ。
-- `@TransactionalEventListener` 里的发送仍是同步等待确认，最坏会阻塞下单响应线程数秒。
+- WebSocket 握手改成必须带管理端 JWT，**管理端前端还没改**：前端未把登录令牌拼到 `ws://...?token=` 上时，
+  来单/催单推送连不上。
+- 限流维度只取 `remoteAddr`：挂到 Nginx/SLB 之后所有请求来源都是代理 IP，需要先在代理层配可信跳数再改。
+- `order.created.DLT` 只声明、只有投递方，**没有消费者或重放工具**，是要接告警的队列。
+- `media_object` 只登记本批之后的新上传：存量对象不会自动回收；`claimDeletion` 先置状态再调 OSS，
+  OSS 删除失败会留下"标记已删、实际还在 bucket"的孤儿行（换取多实例不重复删）。
+- TTL 抖动只覆盖 Spring Cache 这条路径，直接用 `StringRedisTemplate` 写的 key（营业状态、令牌黑名单、限流桶）没有抖动。
 - 没有库存扣减：只有菜品起停售，高并发超卖场景需要另加库存表与乐观锁。
 - 营业额统计结果仍是 `Double`，未打通全链路 `BigDecimal`。
 - `WeChatPayUtil` / `HttpClientUtil` 每次请求新建 HTTP client，没有连接池与熔断。
