@@ -8,16 +8,32 @@
         values (#{openid}, #{name}, #{phone}, #{sex}, #{idNumber}, #{avatar}, #{createTime})
     </insert>
 
+    <!-- 与订单统计同一口径：半开区间 [begin, end)，避免整点记录被两头排除 -->
     <select id="countByMap" resultType="java.lang.Integer">
         select count(id) from user
         <where>
             <if test="begin != null">
-                and create_time &gt; #{begin}
+                and create_time &gt;= #{begin}
             </if>
             <if test="end != null">
                 and create_time &lt; #{end}
             </if>
         </where>
+    </select>
+
+    <!-- 截止某时刻的累计用户数：报表里"总用户数"是逐日累加的存量，用一条查询取区间起点 -->
+    <select id="countUntil" resultType="java.lang.Integer">
+        select count(id) from user where create_time &lt; #{end}
+    </select>
+
+    <!-- 按天聚合新增用户数，替代逐日 count 循环 -->
+    <select id="dailyNewUsers" resultType="com.sky.dto.DailyStatisticsDTO">
+        select date(create_time) as date, count(id) as newUsers
+        from user
+        where create_time &gt;= #{begin}
+          and create_time &lt; #{end}
+        group by date(create_time)
+        order by date(create_time)
     </select>
 
 </mapper>

@@ -23,4 +23,16 @@ public class KafkaTopicConfiguration {
                 .replicas(1)
                 .build();
     }
+
+    /**
+     * 死信 topic 也要显式建：项目关掉了 broker 的 auto-create，
+     * 如果 DLT 不存在，重试耗尽的消息会连"落死信"这一步都失败，等于又回到静默丢消息。
+     */
+    @Bean
+    public NewTopic orderCreatedDeadLetterTopic() {
+        return TopicBuilder.name(KafkaReliabilityConfiguration.ORDER_CREATED_DLT)
+                .partitions(1)
+                .replicas(1)
+                .build();
+    }
 }

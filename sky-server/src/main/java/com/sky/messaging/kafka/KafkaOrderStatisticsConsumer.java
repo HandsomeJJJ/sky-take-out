@@ -50,18 +50,40 @@ public class KafkaOrderStatisticsConsumer {
             }
 
             String statisticsKey = "order:statistics:created:" + orderTime.toLocalDate();
-            Long total = stringRedisTemplate.opsForValue().increment(statisticsKey);
-            if (total != null && total == 1L) {
-                // 只在 key 首次生成时挂过期时间
-                stringRedisTemplate.expire(statisticsKey, STATISTICS_TTL);
+            try {
+                Long total = stringRedisTemplate.opsForValue().increment(statisticsKey);
+                if (total != null && total == 1L) {
+                    // 只在 key 首次生成时挂过期时间
+                    stringRedisTemplate.expire(statisticsKey, STATISTICS_TTL);
+                }
+            } catch (RuntimeException e) {
+                // 去重标记已经占了位，但计数没写进去：不把标记撤掉，重投就会被当成"已处理"直接忽略，
+                // 这一单的统计就永久少算一次。撤掉标记再把异常交回错误处理器重试。
+                releaseDedupKey(dedupKey);
+                throw e;
             }
             log.info("订单异步统计完成，orderId={}, key={}", event.getOrderId(), statisticsKey);
-        } catch (Exception e) {
-            // 毒丸消息不往外抛：抛出去只会让错误处理器反复重试同一条，跳过后由日志告警捞取
-            log.error("订单统计消息处理失败，跳过。topic={}, partition={}, offset={}, payload={}",
+        } catch (IllegalArgumentException e) {
+            // 报文结构问题：重试也不会变好，交给不可重试清单直接进死信，日志留完整现场
+            log.error("订单统计消息格式非法，转死信处理。topic={}, partition={}, offset={}, payload={}",
                     record.topic(), record.partition(), record.offset(), record.value(), e);
+            throw e;
+        } catch (RuntimeException e) {
+            // 原来这里一律 catch 后只打日志：offset 照常提交，这条统计就永久丢了，也没人能从日志里补回来。
+            // 现在往外抛，由 DefaultErrorHandler 按退避重试，重试用尽落 order.created.DLT。
+            log.error("订单统计处理失败，交给错误处理器重试/转死信。topic={}, partition={}, offset={}",
+                    record.topic(), record.partition(), record.offset(), e);
+            throw e;
         } finally {
             MessageTrace.clear();
+        }
+    }
+
+    private void releaseDedupKey(String dedupKey) {
+        try {
+            stringRedisTemplate.delete(dedupKey);
+        } catch (Exception e) {
+            log.error("撤销统计去重标记失败，重投时该订单可能被当作重复消息跳过，key={}", dedupKey, e);
         }
     }
 

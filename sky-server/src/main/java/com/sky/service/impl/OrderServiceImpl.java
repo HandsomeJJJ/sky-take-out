@@ -877,7 +877,9 @@ public class OrderServiceImpl implements OrderService {
      * @param id
      */
     public void delivery(Long id) {
-        int rows = orderMapper.updateStatus(id, Orders.CONFIRMED, Orders.DELIVERY_IN_PROGRESS);
+        // 同时记录"开始派送时间"：派送超时的判定基准是它，不是下单时间
+        int rows = orderMapper.startDelivery(id, Orders.CONFIRMED, Orders.DELIVERY_IN_PROGRESS,
+                LocalDateTime.now());
         if (rows != 1) {
             throw new OrderBusinessException(MessageConstant.ORDER_STATUS_ERROR);
         }

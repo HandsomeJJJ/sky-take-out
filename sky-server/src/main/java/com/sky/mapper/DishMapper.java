@@ -98,4 +98,8 @@ public interface DishMapper {
             "<foreach collection=\"ids\" item=\"id\" open=\"(\" separator=\",\" close=\")\">#{id}</foreach>" +
             "</script>")
     List<Dish> getByIds(@Param("ids") List<Long> ids);
+
+    /** 还有多少菜品在用这张图：回收 OSS 对象前的引用检查之一 */
+    @Select("select count(1) from dish where image = #{image}")
+    int countByImage(@Param("image") String image);
 }

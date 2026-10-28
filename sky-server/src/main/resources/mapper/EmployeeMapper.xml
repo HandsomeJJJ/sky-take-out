@@ -2,8 +2,15 @@
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         "http://mybatis.org/dtd/mybatis-3-mapper.dtd" >
 <mapper namespace="com.sky.mapper.EmployeeMapper">
+    <!--
+        列表不返回 password 与 id_number：
+        select * 会把 BCrypt 哈希和身份证号整页带进响应体，等于把口令散列交到任何能翻员工列表的人手上
+        （离线爆破只是时间问题），身份证更是直接的个人信息泄露。
+        详情接口按需要单独取，编辑表单要回填什么就显式查什么。
+    -->
     <select id="pageQuery" resultType="com.sky.entity.Employee">
-        select * from employee
+        select id, name, username, phone, sex, create_time, update_time, create_user, update_user, status
+        from employee
         <where>
             <if test="name != null and name != ''">
                 and name like concat('%',#{name},'%')

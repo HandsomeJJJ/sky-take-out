@@ -5,6 +5,7 @@ import org.apache.ibatis.annotations.Delete;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
+import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 import java.util.List;
 
@@ -91,6 +92,10 @@ public interface ShoppingCartMapper {
             "<foreach collection=\"ids\" item=\"id\" open=\"(\" separator=\",\" close=\")\">#{id}</foreach>" +
             "</script>")
     int deleteBySetmealIds(@Param("ids") List<Long> ids);
+
+    /** 还有多少购物车行在用这张图 */
+    @Select("select count(1) from shopping_cart where image = #{image}")
+    int countByImage(@Param("image") String image);
 
     /**
      * 批量插入购物车数据

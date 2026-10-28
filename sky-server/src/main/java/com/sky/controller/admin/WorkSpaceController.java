@@ -13,8 +13,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.time.LocalTime;
 
 /**
  * 工作台
@@ -35,10 +35,10 @@ public class WorkSpaceController {
     @GetMapping("/businessData")
     @ApiOperation("工作台今日数据查询")
     public Result<BusinessDataVO> businessData(){
-        //获得当天的开始时间
-        LocalDateTime begin = LocalDateTime.now().with(LocalTime.MIN);
-        //获得当天的结束时间
-        LocalDateTime end = LocalDateTime.now().with(LocalTime.MAX);
+        // 半开区间 [今日 00:00, 次日 00:00)：配 LocalTime.MAX 用闭区间时，
+        // 23:59.599999999 之后、次日 00:00 之前落库的订单不属于任何一天
+        LocalDateTime begin = LocalDate.now().atStartOfDay();
+        LocalDateTime end = LocalDate.now().plusDays(1).atStartOfDay();
 
         BusinessDataVO businessDataVO = workspaceService.getBusinessData(begin, end);
         return Result.success(businessDataVO);

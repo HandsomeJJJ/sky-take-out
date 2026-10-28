@@ -25,13 +25,37 @@ public class WebSocketServer {
     //必须用线程安全容器：Tomcat 会在多个线程上回调 onOpen/onClose/sendToAllClient。
     private static final Map<String, Session> SESSION_MAP = new ConcurrentHashMap<>();
 
+    //握手鉴权器由 Spring 侧的 WebSocketAuthenticator 在初始化时注入：
+    //@ServerEndpoint 的实例是容器按连接 new 出来的，拿不到 Spring 容器，只能走静态引用。
+    private static volatile WebSocketAuthenticator authenticator;
+
+    static void setAuthenticator(WebSocketAuthenticator authenticator) {
+        WebSocketServer.authenticator = authenticator;
+    }
+
     /**
      * 连接建立成功调用的方法
      */
     @OnOpen
     public void onOpen(Session session, @PathParam("sid") String sid) {
-        log.info("客户端：{}建立连接，当前在线连接数={}", sid, SESSION_MAP.size() + 1);
-        SESSION_MAP.put(sid, session);
+        //地址是 ws://host/ws/{sid}?token=xxx，任意客户端都能连上这个广播通道拿到订单推送，
+        //所以握手先验令牌；鉴权器还没注册说明装配失败，宁可拒绝也不能裸奔。
+        if (authenticator == null) {
+            log.error("WebSocket 鉴权器未注册，拒绝连接 sid={}", sid);
+            closeQuietly(session);
+            return;
+        }
+        String query = session.getRequestURI() == null ? null : session.getRequestURI().getQuery();
+        if (!authenticator.isAuthorized(query)) {
+            log.warn("客户端：{}握手鉴权失败，关闭连接", sid);
+            closeQuietly(session);
+            return;
+        }
+
+        //同一 sid 重连时先摘掉旧会话，否则旧连接断开会把新会话误删
+        Session previous = SESSION_MAP.put(sid, session);
+        closeQuietly(previous);
+        log.info("客户端：{}建立连接，当前在线连接数={}", sid, SESSION_MAP.size());
     }
 
     /**
@@ -50,8 +74,9 @@ public class WebSocketServer {
      * @param sid
      */
     @OnClose
-    public void onClose(@PathParam("sid") String sid) {
-        SESSION_MAP.remove(sid);
+    public void onClose(Session session, @PathParam("sid") String sid) {
+        //重连后旧会话的 close 回调可能晚于新会话的 open，按值删除才不会把新会话摘掉
+        SESSION_MAP.remove(sid, session);
         log.info("连接断开:{}", sid);
     }
 

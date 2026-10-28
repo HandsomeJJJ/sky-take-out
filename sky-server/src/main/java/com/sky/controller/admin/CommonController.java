@@ -2,6 +2,7 @@ package com.sky.controller.admin;
 
 import com.sky.constant.MessageConstant;
 import com.sky.result.Result;
+import com.sky.service.MediaService;
 import com.sky.utils.AliOssUtil;
 import io.swagger.annotations.Api;
 import io.swagger.annotations.ApiOperation;
@@ -30,11 +31,14 @@ public class CommonController {
     private static final List<String> ALLOWED_EXTENSIONS = List.of("jpg", "jpeg", "png", "gif", "webp");
 
     private final AliOssUtil aliOssUtil;
+    private final MediaService mediaService;
     private final long maxUploadBytes;
 
     public CommonController(AliOssUtil aliOssUtil,
+                            MediaService mediaService,
                             @Value("${sky.upload.max-size-kb:2048}") long maxUploadKb) {
         this.aliOssUtil = aliOssUtil;
+        this.mediaService = mediaService;
         this.maxUploadBytes = maxUploadKb * 1024;
     }
 
@@ -76,6 +80,9 @@ public class CommonController {
         // 否则 ../ 或超长中文名会进到 OSS key 里
         String objectName = UUID.randomUUID().toString().replace("-", "") + "." + extension;
         String filePath = aliOssUtil.upload(bytes, objectName);
+        // 登记进回收站的候选表：不登记的话这个对象就再也没人知道它存在，
+        // 而"删除菜品时顺手删图"是错的（历史订单还要看这张图）
+        mediaService.register(filePath);
         log.info("文件上传成功，objectName={}", objectName);
         return Result.success(filePath);
     }

@@ -69,11 +69,17 @@
         order by order_time desc
     </select>
 
+    <!--
+        统计区间的边界一律用半开区间 [begin, end)：
+        原来写的是 > begin / < end 并配 LocalTime.MIN/MAX，
+        结果 00:00.000 整点落库的订单被两头排除，23:59.599999999 到次日 00:00 之间的那一毫秒也不属于任何一天。
+        调用方现在传"当日 00:00"到"次日 00:00"，一条记录都不会掉在区间缝里。
+    -->
     <select id="sumByMap" resultType="java.lang.Double">
         select sum(amount) from orders
         <where>
             <if test="begin != null">
-                and order_time &gt; #{begin}
+                and order_time &gt;= #{begin}
             </if>
             <if test="end != null">
                 and order_time &lt; #{end}
@@ -87,7 +93,7 @@
         select count(id) from orders
         <where>
             <if test="begin != null">
-                and order_time &gt; #{begin}
+                and order_time &gt;= #{begin}
             </if>
             <if test="end != null">
                 and order_time &lt; #{end}
@@ -97,18 +103,44 @@
             </if>
         </where>
     </select>
+
+    <!--
+        按天一次聚合出营业额、总订单数、有效订单数。
+        原来逐日循环查询：30 天导出 = 120 次查询，366 天区间 = 上千次，而且每分钟都有人打开工作台。
+        口径与 sumByMap/countByMap 完全一致（营业额与有效订单只算 status=5，总数算全部状态）。
+    -->
+    <select id="dailyOrderStatistics" resultType="com.sky.dto.DailyStatisticsDTO">
+        select date(order_time)                                                    as date,
+               sum(case when status = 5 then amount else 0 end)                     as turnover,
+               count(id)                                                           as totalOrders,
+               sum(case when status = 5 then 1 else 0 end)                          as validOrders
+        from orders
+        where order_time &gt;= #{begin}
+          and order_time &lt; #{end}
+        group by date(order_time)
+        order by date(order_time)
+    </select>
+
+    <!--
+        销量排名：按 SKU 的 id 分组而不是按名称分组。
+        按 od.name 分组有三个口径问题：菜品改名后历史销量断档、两个同名菜品被合并、
+        套餐与单品同名的时候也被合并。分组键换成 id 后，改名前后仍然是同一个商品。
+        展示名取窗口内出现过的名字之一（字典序最大），要精确到"当前名称"得再关联 dish/setmeal，
+        这里只用于报表展示，不影响销量数字本身。
+    -->
     <select id="getSalesTop10" resultType="com.sky.dto.GoodsSalesDTO">
-        select od.name, sum(od.number) number
-        from order_detail od,orders o
-        where od.order_id = o.id and o.status = 5
+        select max(od.name) as name, sum(od.number) as number
+        from order_detail od
+        inner join orders o on od.order_id = o.id
+        where o.status = 5
         <if test="begin != null">
-            and o.order_time &gt; #{begin}
+            and o.order_time &gt;= #{begin}
         </if>
         <if test="end != null">
             and o.order_time &lt; #{end}
         </if>
-        group by od.name
+        group by coalesce(od.dish_id, 0), coalesce(od.setmeal_id, 0)
         order by number desc
-        limit 0,10
+        limit 10
     </select>
 </mapper>

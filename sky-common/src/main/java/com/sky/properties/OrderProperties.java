@@ -23,4 +23,10 @@ public class OrderProperties {
 
     /** 单个商品可购买的最大份数，与购物车行的上限保持一致 */
     private Integer maxNumberPerItem = 99;
+
+    /**
+     * 派送中订单的自动收尾时长（分钟）：从**开始派送**算起超过这个时间仍未完成，
+     * 按平台规则自动确认收货。原来用下单时间判定 60 分钟，等于把"接单+备餐"的时间也算进了派送窗口。
+     */
+    private Integer autoCompleteAfterMinutes = 120;
 }

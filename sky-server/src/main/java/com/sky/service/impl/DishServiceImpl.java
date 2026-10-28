@@ -18,6 +18,7 @@ import com.sky.mapper.SetmealMapper;
 import com.sky.mapper.ShoppingCartMapper;
 import com.sky.result.PageResult;
 import com.sky.service.DishService;
+import com.sky.service.MediaService;
 import com.sky.vo.DishVO;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
@@ -26,7 +27,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 @Service
 @Slf4j
@@ -42,6 +46,8 @@ public class DishServiceImpl implements DishService {
     private SetmealMapper setmealMapper;
     @Autowired
     private ShoppingCartMapper shoppingCartMapper;
+    @Autowired
+    private MediaService mediaService;
 
     /**
      * 新增菜品和对应的口味
@@ -91,6 +97,7 @@ public class DishServiceImpl implements DishService {
     @Transactional(rollbackFor = Exception.class)
     public void deleteBatch(List<Long> ids) {
         //判断当前菜品是否能够删除---是否存在起售中的菜品？？
+        List<String> images = new ArrayList<>();
         for (Long id : ids) {
             Dish dish = dishMapper.getById(id);
             if (dish == null) {
@@ -99,6 +106,9 @@ public class DishServiceImpl implements DishService {
             if (StatusConstant.ENABLE.equals(dish.getStatus())) {
                 //当前菜品处于起售中，不能删除
                 throw new DeletionNotAllowedException(MessageConstant.DISH_ON_SALE);
+            }
+            if (dish.getImage() != null) {
+                images.add(dish.getImage());
             }
         }
 
@@ -122,6 +132,9 @@ public class DishServiceImpl implements DishService {
         if (cleaned > 0) {
             log.info("删除菜品后清理购物车行 {} 条", cleaned);
         }
+
+        // 图片交给回收流程判断：可能还有历史订单在引用同一张图，这里只登记"已无商品引用"
+        mediaService.retireIfUnreferenced(images);
     }
 
     /**
@@ -155,6 +168,7 @@ public class DishServiceImpl implements DishService {
      */
     @Transactional(rollbackFor = Exception.class)
     public void updateWithFlavor(DishDTO dishDTO) {
+        Dish existing = dishMapper.getById(dishDTO.getId());
         Dish dish = new Dish();
         BeanUtils.copyProperties(dishDTO, dish);
 
@@ -172,6 +186,12 @@ public class DishServiceImpl implements DishService {
             });
             //向口味表插入n条数据
             dishFlavorMapper.insertBatch(flavors);
+        }
+
+        // 换了图就把旧图交给回收流程；图片没变则不动
+        if (existing != null && existing.getImage() != null
+                && !existing.getImage().equals(dishDTO.getImage())) {
+            mediaService.retireIfUnreferenced(List.of(existing.getImage()));
         }
     }
 
@@ -228,17 +248,21 @@ public class DishServiceImpl implements DishService {
      */
     public List<DishVO> listWithFlavor(Dish dish) {
         List<Dish> dishList = dishMapper.list(dish);
+        if (dishList.isEmpty()) {
+            return new ArrayList<>();
+        }
 
-        List<DishVO> dishVOList = new ArrayList<>();
+        // 口味一次批量查回来再按 dishId 分组：原来每个菜品单查一次口味，
+        // 一个分类 30 个菜就是 31 条 SQL，而这是 C 端浏览菜单的热路径（只靠缓存缓解不等于没问题）
+        List<Long> dishIds = dishList.stream().map(Dish::getId).collect(Collectors.toList());
+        Map<Long, List<DishFlavor>> flavorsByDish = dishFlavorMapper.getByDishIds(dishIds).stream()
+                .collect(Collectors.groupingBy(DishFlavor::getDishId));
 
+        List<DishVO> dishVOList = new ArrayList<>(dishList.size());
         for (Dish d : dishList) {
             DishVO dishVO = new DishVO();
-            BeanUtils.copyProperties(d,dishVO);
-
-            //根据菜品id查询对应的口味
-            List<DishFlavor> flavors = dishFlavorMapper.getByDishId(d.getId());
-
-            dishVO.setFlavors(flavors);
+            BeanUtils.copyProperties(d, dishVO);
+            dishVO.setFlavors(flavorsByDish.getOrDefault(d.getId(), Collections.emptyList()));
             dishVOList.add(dishVO);
         }
 

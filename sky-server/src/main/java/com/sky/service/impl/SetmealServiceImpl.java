@@ -17,6 +17,7 @@ import com.sky.mapper.SetmealMapper;
 import com.sky.mapper.ShoppingCartMapper;
 import com.sky.result.PageResult;
 import com.sky.service.SetmealService;
+import com.sky.service.MediaService;
 import com.sky.vo.DishItemVO;
 import com.sky.vo.SetmealVO;
 import lombok.extern.slf4j.Slf4j;
@@ -25,6 +26,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -42,6 +44,8 @@ public class SetmealServiceImpl implements SetmealService {
     private DishMapper dishMapper;
     @Autowired
     private ShoppingCartMapper shoppingCartMapper;
+    @Autowired
+    private MediaService mediaService;
 
     /**
      * 新增套餐，同时需要保存套餐和菜品的关联关系
@@ -90,6 +94,7 @@ public class SetmealServiceImpl implements SetmealService {
      */
     @Transactional
     public void deleteBatch(List<Long> ids) {
+        List<String> images = new ArrayList<>();
         ids.forEach(id -> {
             Setmeal setmeal = setmealMapper.getById(id);
             if (setmeal == null) {
@@ -99,6 +104,9 @@ public class SetmealServiceImpl implements SetmealService {
             if (StatusConstant.ENABLE.equals(setmeal.getStatus())) {
                 //起售中的套餐不能删除
                 throw new DeletionNotAllowedException(MessageConstant.SETMEAL_ON_SALE);
+            }
+            if (setmeal.getImage() != null) {
+                images.add(setmeal.getImage());
             }
         });
 
@@ -114,6 +122,9 @@ public class SetmealServiceImpl implements SetmealService {
         if (cleaned > 0) {
             log.info("删除套餐后清理购物车行 {} 条", cleaned);
         }
+
+        // 图片走回收流程：可能仍有历史订单在引用
+        mediaService.retireIfUnreferenced(images);
     }
 
     /**
@@ -134,6 +145,7 @@ public class SetmealServiceImpl implements SetmealService {
      */
     @Transactional
     public void update(SetmealDTO setmealDTO) {
+        Setmeal existing = setmealMapper.getById(setmealDTO.getId());
         Setmeal setmeal = new Setmeal();
         BeanUtils.copyProperties(setmealDTO, setmeal);
 
@@ -152,6 +164,12 @@ public class SetmealServiceImpl implements SetmealService {
         });
         //3、重新插入套餐和菜品的关联关系，操作setmeal_dish表，执行insert
         setmealDishMapper.insertBatch(setmealDishes);
+
+        // 换图后旧图交给回收流程（仍被历史订单引用的话不会被真删）
+        if (existing != null && existing.getImage() != null
+                && !existing.getImage().equals(setmealDTO.getImage())) {
+            mediaService.retireIfUnreferenced(List.of(existing.getImage()));
+        }
     }
 
     /**

@@ -6,8 +6,8 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 /**
- * 接口限流注解：基于 Redis 计数器的固定窗口限流。
- * 用于下单、催单等易被刷的写接口。
+ * 接口限流注解：基于 Redis ZSET 的滑动窗口计数。
+ * 用于下单、催单等易被刷的写接口；被限流时由全局异常处理器返回 HTTP 429 + Retry-After。
  */
 @Target(ElementType.METHOD)
 @Retention(RetentionPolicy.RUNTIME)

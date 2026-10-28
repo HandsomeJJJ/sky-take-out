@@ -152,7 +152,9 @@ public class EmployeeController {
     @PutMapping
     @ApiOperation("编辑员工信息")
     public Result update(@RequestBody @Valid EmployeeDTO employeeDTO){
-        log.info("编辑员工信息：{}", employeeDTO);
+        // 只打定位信息：整个 DTO 的 toString 里有手机号和身份证号，打进日志就等于把这些交给
+        // 所有能读到日志的人（日志制品的可见范围通常远大于数据库）
+        log.info("编辑员工信息，id={}，username={}", employeeDTO.getId(), employeeDTO.getUsername());
         employeeService.update(employeeDTO);
         return Result.success();
     }

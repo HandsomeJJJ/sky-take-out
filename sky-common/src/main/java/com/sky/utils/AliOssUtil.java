@@ -63,4 +63,29 @@ public class AliOssUtil {
 
         return stringBuilder.toString();
     }
+
+    /**
+     * 删除对象存储上的文件。
+     * <p>
+     * 原来只有 upload，没有任何一处删除：删菜品、换菜品图片之后，旧图永久留在 bucket 里。
+     * 单个文件不大，但这是一个只增不减的存储成本，而且里面装着下架商品的图片。
+     *
+     * @param objectName 对象名（bucket 内的 key，不是完整 URL）
+     */
+    public void delete(String objectName) {
+        OSS ossClient = new OSSClientBuilder().build(endpoint, accessKeyId, accessKeySecret);
+        try {
+            ossClient.deleteObject(bucketName, objectName);
+            log.info("OSS 对象已删除：{}", objectName);
+        } catch (OSSException oe) {
+            log.error("OSS 删除被拒绝，objectName={}, errorCode={}, requestId={}",
+                    objectName, oe.getErrorCode(), oe.getRequestId());
+            throw new BaseException("文件删除失败：" + oe.getErrorCode());
+        } catch (ClientException ce) {
+            log.error("OSS 客户端异常，objectName={}, errorMessage={}", objectName, ce.getMessage());
+            throw new BaseException("文件删除失败：无法连接对象存储");
+        } finally {
+            ossClient.shutdown();
+        }
+    }
 }

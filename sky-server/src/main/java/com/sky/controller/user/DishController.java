@@ -31,8 +31,9 @@ public class DishController {
      */
     @GetMapping("/list")
     @ApiOperation("根据分类id查询菜品")
-    // Spring Cache 统一管理：带 TTL，且空列表也会缓存，避免缓存穿透
-    @Cacheable(cacheNames = "dishCache", key = "#categoryId")
+    // Spring Cache 统一管理：带 TTL 与抖动，空列表也会缓存（防穿透）；
+    // sync = true 让热点分类过期时只有一个线程回源，其余线程等它写回（防击穿）
+    @Cacheable(cacheNames = "dishCache", key = "#categoryId", sync = true)
     public Result<List<DishVO>> list(Long categoryId) {
         Dish dish = new Dish();
         dish.setCategoryId(categoryId);

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.jsontype.PolymorphicTypeValidator;
 import com.fasterxml.jackson.databind.jsontype.BasicPolymorphicTypeValidator;
+import com.sky.cache.JitteredTtlRedisCacheWriter;
 import com.sky.json.JacksonObjectMapper;
 import com.sky.websocket.WebSocketMessagePublisher;
 import com.sky.websocket.WebSocketMessageSubscriber;
@@ -45,8 +46,15 @@ public class RedisConfiguration {
     }
 
     /**
-     * 缓存管理器：JSON 序列化 + 统一 TTL + 允许缓存空值（防缓存穿透）。
-     * 用 TransactionAwareCacheManagerProxy 包装，让 @CacheEvict 延迟到事务提交后再删缓存，
+     * 缓存管理器：JSON 序列化 + 带抖动的 TTL + 允许缓存空值（防缓存穿透）。
+     * <p>
+     * 两层防护：
+     * 1. **雪崩** —— TTL 不再是所有 key 同一个 60 分钟，而是每个 key 在 ±20% 里浮动，
+     *    避免集体过期后第一波请求全打到数据库；
+     * 2. **击穿** —— 底层用 lockingRedisCacheWriter，配合读接口上的 {@code @Cacheable(sync = true)}，
+     *    热点 key 过期时只有一个线程回源，其余线程等它写回，而不是全部涌向数据库。
+     * <p>
+     * 用 TransactionAwareCacheManagerProxy 再包一层，让 @CacheEvict 延迟到事务提交后再删缓存，
      * 避免"事务还没提交就删了缓存，并发请求把旧数据回填进缓存"的脏数据问题。
      */
     @Bean
@@ -59,7 +67,8 @@ public class RedisConfiguration {
                         .fromSerializer(jsonSerializer()))
                 .computePrefixWith(cacheName -> cacheName + "::");
 
-        RedisCacheManager redisCacheManager = RedisCacheManager.builder(redisConnectionFactory)
+        RedisCacheManager redisCacheManager = RedisCacheManager.builder(
+                        JitteredTtlRedisCacheWriter.locking(redisConnectionFactory))
                 .cacheDefaults(config)
                 .build();
 

@@ -145,6 +145,12 @@ sky:
     pack-fee-per-item: ${PACK_FEE_PER_ITEM:1.00}
     pack-fee-max: ${PACK_FEE_MAX:20.00}
     max-number-per-item: ${MAX_NUMBER_PER_ITEM:99}
+    # 派送超时自动收尾的阈值，判定基准是"开始派送时间"而不是下单时间
+    auto-complete-after-minutes: ${AUTO_COMPLETE_AFTER_MINUTES:120}
+  media:
+    # 图片不再被引用后仍要在 bucket 里留足这个天数，历史订单明细里的 URL 才不至于变成 404
+    retention-days: ${MEDIA_RETENTION_DAYS:180}
+    purge-batch-size: ${MEDIA_PURGE_BATCH_SIZE:100}
   shop:
     address: 北京市海淀区上地十街10号
   baidu:

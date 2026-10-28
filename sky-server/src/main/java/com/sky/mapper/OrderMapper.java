@@ -1,6 +1,7 @@
 package com.sky.mapper;
 
 import com.github.pagehelper.Page;
+import com.sky.dto.DailyStatisticsDTO;
 import com.sky.dto.GoodsSalesDTO;
 import com.sky.dto.OrdersPageQueryDTO;
 import com.sky.entity.Orders;
@@ -110,7 +111,7 @@ public interface OrderMapper {
     /**
      * 仅取消待支付订单。status 条件使消息重复投递时仍然幂等。
      */
-    @org.apache.ibatis.annotations.Update("update orders set status = 6, cancel_reason = #{cancelReason}, cancel_time = #{cancelTime} " +
+    @Update("update orders set status = 6, cancel_reason = #{cancelReason}, cancel_time = #{cancelTime} " +
             "where id = #{id} and status = 1")
     int cancelPendingPaymentById(@Param("id") Long id, @Param("cancelReason") String cancelReason,
                                  @Param("cancelTime") LocalDateTime cancelTime);
@@ -119,7 +120,7 @@ public interface OrderMapper {
      * 带前置状态的状态推进（乐观锁）：仅当当前状态等于 expectedStatus 才更新。
      * 并发下两个请求同时接单/派送，只有一个能成功，避免重复更新。
      */
-    @org.apache.ibatis.annotations.Update("update orders set status = #{newStatus} " +
+    @Update("update orders set status = #{newStatus} " +
             "where id = #{id} and status = #{expectedStatus}")
     int updateStatus(@Param("id") Long id, @Param("expectedStatus") Integer expectedStatus,
                      @Param("newStatus") Integer newStatus);
@@ -127,25 +128,47 @@ public interface OrderMapper {
     /**
      * 完成订单：同样带前置状态条件，同时写入送达时间。
      */
-    @org.apache.ibatis.annotations.Update("update orders set status = #{newStatus}, delivery_time = #{deliveryTime} " +
+    @Update("update orders set status = #{newStatus}, delivery_time = #{deliveryTime} " +
             "where id = #{id} and status = #{expectedStatus}")
     int completeByIdAndExpectedStatus(@Param("id") Long id, @Param("expectedStatus") Integer expectedStatus,
                                       @Param("newStatus") Integer newStatus,
                                       @Param("deliveryTime") LocalDateTime deliveryTime);
 
     /**
+     * 开始派送：状态推进 + 记录"什么时候进入派送"。
+     * 派送动作原来不留任何时间，超时收尾只能拿下单时间判定，
+     * 于是"下单 40 分钟后才派送"的订单只剩下 20 分钟窗口，到点就被系统置成已完成。
+     */
+    @Update("update orders set status = #{newStatus}, delivery_start_time = #{deliveryStartTime} " +
+            "where id = #{id} and status = #{expectedStatus}")
+    int startDelivery(@Param("id") Long id, @Param("expectedStatus") Integer expectedStatus,
+                      @Param("newStatus") Integer newStatus,
+                      @Param("deliveryStartTime") LocalDateTime deliveryStartTime);
+
+    /**
+     * 扫描派送超时的订单：以开始派送时间为基准，历史数据没有该字段时回退到下单时间，
+     * 保证老订单不会因为新列为空而永远扫不到。必须带 limit。
+     */
+    @Select("select * from orders where status = #{status} " +
+            "and coalesce(delivery_start_time, order_time) < #{staleBefore} " +
+            "order by coalesce(delivery_start_time, order_time) asc limit #{limit}")
+    List<Orders> getStaleByDeliveryStartTime(@Param("status") Integer status,
+                                             @Param("staleBefore") LocalDateTime staleBefore,
+                                             @Param("limit") int limit);
+
+    /**
      * 迟到支付：订单已经被超时取消（status=6），但用户在取消前调起的微信支付仍然成功。
      * 只把支付状态推进到"已支付"，状态仍是已取消 —— 钱进来必须留痕，随后由退款流程把钱退回，
      * 不能像原来一样只打一行 warn，那等于收了钱不认账也不退。
      */
-    @org.apache.ibatis.annotations.Update("update orders set pay_status = 1, checkout_time = #{checkoutTime} " +
+    @Update("update orders set pay_status = 1, checkout_time = #{checkoutTime} " +
             "where number = #{number} and status = 6 and pay_status = 0")
     int markLatePayment(@Param("number") String number, @Param("checkoutTime") LocalDateTime checkoutTime);
 
     /**
      * 退款到账：只允许从"已支付"改到"已退款"，重复回调打不到已经退过款的订单。
      */
-    @org.apache.ibatis.annotations.Update("update orders set pay_status = 2 where id = #{id} and pay_status = 1")
+    @Update("update orders set pay_status = 2 where id = #{id} and pay_status = 1")
     int markRefunded(@Param("id") Long id);
 
     /**
@@ -156,11 +179,18 @@ public interface OrderMapper {
     Double sumByMap(Map map);
 
     /**
-     * 根据动态条件统计订单数量
+     * 统计指定时间区间内的订单数量
      * @param map
      * @return
      */
     Integer countByMap(Map map);
+
+    /**
+     * 按天聚合营业额与订单数，区间按半开 [begin, end) 取值。
+     * 一次查询替代"逐日循环查"，导出 30 天不再是 120 次查询。
+     */
+    List<DailyStatisticsDTO> dailyOrderStatistics(@Param("begin") LocalDateTime begin,
+                                                  @Param("end") LocalDateTime end);
 
     /**
      * 统计指定时间区间内的销量排名前10
@@ -168,5 +198,5 @@ public interface OrderMapper {
      * @param end
      * @return
      */
-    List<GoodsSalesDTO> getSalesTop10(LocalDateTime begin,LocalDateTime end);
+    List<GoodsSalesDTO> getSalesTop10(@Param("begin") LocalDateTime begin, @Param("end") LocalDateTime end);
 }

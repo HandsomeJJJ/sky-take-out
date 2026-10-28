@@ -43,8 +43,14 @@ public class MqMessageSender {
     /** "发送中"状态超过这个时长视为持有者已崩溃 */
     private static final Duration SENDING_STALE = Duration.ofMinutes(5);
 
-    /** 整个扫描过程串行化，避免多个实例/线程同时处理同一批记录 */
-    private static final String SENDER_LOCK_KEY = "mq:sender:lock";
+    /** 发送锁按通道拆分：每个通道一把锁，互不阻塞 */
+    private static final String SENDER_LOCK_PREFIX = "mq:sender:lock:";
+
+    /** 走 RabbitMQ 延迟队列的业务类型 */
+    private static final List<String> RABBIT_BIZ_TYPES = List.of(BIZ_ORDER_TIMEOUT);
+
+    /** 走 Kafka 的业务类型 */
+    private static final List<String> KAFKA_BIZ_TYPES = List.of(BIZ_ORDER_STATS);
 
     private final MqMessageMapper mqMessageMapper;
     private final RabbitTemplate rabbitTemplate;
@@ -65,16 +71,27 @@ public class MqMessageSender {
     }
 
     /**
-     * 扫描并发送待发送消息。事务提交后立即调用一次 + 定时补偿调用。
+     * 扫描并发送待发送消息。事务提交后异步触发一次 + 定时补偿调用。
+     * 每个目标中间件一把锁、一批消息，两个通道互不阻塞。
      */
     public void sendPending() {
         if (!messagingSwitch.anyEnabled()) {
             log.debug("Kafka / RabbitMQ 均未启用，跳过本地消息发送");
             return;
         }
-        // 不等待：拿不到锁说明别的实例正在发，直接跳过（重复投递只会给消费者制造幂等负担）
-        if (!redisLock.tryLock(SENDER_LOCK_KEY, Duration.ZERO)) {
-            log.debug("已有实例在发送本地消息，本次跳过");
+        sendPendingFor(RABBIT_BIZ_TYPES);
+        sendPendingFor(KAFKA_BIZ_TYPES);
+    }
+
+    /**
+     * 按通道发送。原来一把全局锁罩住两个通道：RabbitMQ 卡住等确认时，Kafka 的消息也在排队，
+     * 水平扩容也救不了吞吐，因为所有实例都在抢同一把锁。
+     */
+    private void sendPendingFor(List<String> bizTypes) {
+        String lockKey = SENDER_LOCK_PREFIX + bizTypes.get(0);
+        // 不等待：拿不到锁说明别的实例正在发这个通道，直接跳过（重复投递只会给消费者制造幂等负担）
+        if (!redisLock.tryLock(lockKey, Duration.ZERO)) {
+            log.debug("已有实例在发送 {} 通道的本地消息，本次跳过", bizTypes);
             return;
         }
         try {
@@ -83,7 +100,8 @@ public class MqMessageSender {
                 log.warn("回收了 {} 条卡在发送中的消息（持有者可能已崩溃）", reclaimed);
             }
 
-            List<MqMessage> pending = mqMessageMapper.listPending(MqMessage.PENDING, BATCH_SIZE);
+            List<MqMessage> pending = mqMessageMapper.listPendingByBizTypes(
+                    MqMessage.PENDING, bizTypes, BATCH_SIZE);
             for (MqMessage msg : pending) {
                 if (!messagingSwitch.isEnabledFor(msg.getBizType())) {
                     continue;
@@ -95,7 +113,7 @@ public class MqMessageSender {
                 sendOne(msg);
             }
         } finally {
-            redisLock.unlock(SENDER_LOCK_KEY);
+            redisLock.unlock(lockKey);
         }
     }
 

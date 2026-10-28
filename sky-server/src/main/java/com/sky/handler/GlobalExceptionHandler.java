@@ -2,9 +2,11 @@ package com.sky.handler;
 
 import com.sky.constant.MessageConstant;
 import com.sky.exception.BaseException;
+import com.sky.exception.RateLimitException;
 import com.sky.result.Result;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -13,6 +15,7 @@ import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
+import javax.servlet.http.HttpServletResponse;
 import javax.validation.ConstraintViolation;
 import javax.validation.ConstraintViolationException;
 import java.util.stream.Collectors;
@@ -32,6 +35,21 @@ public class GlobalExceptionHandler {
     @ExceptionHandler
     public Result exceptionHandler(BaseException ex){
         log.error("异常信息：{}", ex.getMessage());
+        return Result.error(ex.getMessage());
+    }
+
+    /**
+     * 触发限流：HTTP 429 + Retry-After。
+     * <p>
+     * 之前它只是 BaseException 的一种，返回 200 + code=0 —— 客户端按 HTTP 状态分支的拦截器
+     * 会当成成功，重试策略（该等多久）也完全没有依据。限流的语义本来就是"请求太多"，
+     * 用 429 表达，同时保留 Result 里的业务提示。
+     */
+    @ExceptionHandler(RateLimitException.class)
+    @ResponseStatus(HttpStatus.TOO_MANY_REQUESTS)
+    public Result exceptionHandler(RateLimitException ex, HttpServletResponse response) {
+        log.warn("请求被限流，建议 {} 秒后重试：{}", ex.getRetryAfterSeconds(), ex.getMessage());
+        response.setHeader(HttpHeaders.RETRY_AFTER, String.valueOf(ex.getRetryAfterSeconds()));
         return Result.error(ex.getMessage());
     }
 

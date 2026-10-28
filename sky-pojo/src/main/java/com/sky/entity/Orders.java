@@ -99,6 +99,9 @@ public class Orders implements Serializable {
     //送达时间
     private LocalDateTime deliveryTime;
 
+    //开始派送时间：判定"派送超时"要用它，不能用下单时间
+    private LocalDateTime deliveryStartTime;
+
     //打包费（服务端按份数计算，不接受客户端填写）
     private BigDecimal packAmount;
 

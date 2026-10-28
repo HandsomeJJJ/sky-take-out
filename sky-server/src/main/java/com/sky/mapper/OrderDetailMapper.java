@@ -29,4 +29,12 @@ public interface OrderDetailMapper {
     @Select("<script>select * from order_detail where order_id in " +
             "<foreach collection='orderIds' item='id' open='(' separator=',' close=')'>#{id}</foreach></script>")
     List<OrderDetail> getByOrderIds(@Param("orderIds") List<Long> orderIds);
+
+    /**
+     * 还有多少历史订单明细在用这张图。
+     * 这是"能不能真的删掉 OSS 对象"最关键的一条：明细里存的是图片 URL 快照，
+     * 用户回看历史订单时还要看图，删了对象就是 404。
+     */
+    @Select("select count(1) from order_detail where image = #{image}")
+    int countByImage(@Param("image") String image);
 }
