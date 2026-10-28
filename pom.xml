@@ -29,7 +29,7 @@
         <knife4j>3.0.2</knife4j>
         <jjwt>0.12.6</jjwt>
         <jaxb-api>2.3.1</jaxb-api>
-        <poi>5.2.5</poi>
+        <poi>6.0.0</poi>
         <redisson>3.17.7</redisson>
     </properties>
     <dependencyManagement>
