@@ -134,6 +134,21 @@ public interface OrderMapper {
                                       @Param("deliveryTime") LocalDateTime deliveryTime);
 
     /**
+     * 迟到支付：订单已经被超时取消（status=6），但用户在取消前调起的微信支付仍然成功。
+     * 只把支付状态推进到"已支付"，状态仍是已取消 —— 钱进来必须留痕，随后由退款流程把钱退回，
+     * 不能像原来一样只打一行 warn，那等于收了钱不认账也不退。
+     */
+    @org.apache.ibatis.annotations.Update("update orders set pay_status = 1, checkout_time = #{checkoutTime} " +
+            "where number = #{number} and status = 6 and pay_status = 0")
+    int markLatePayment(@Param("number") String number, @Param("checkoutTime") LocalDateTime checkoutTime);
+
+    /**
+     * 退款到账：只允许从"已支付"改到"已退款"，重复回调打不到已经退过款的订单。
+     */
+    @org.apache.ibatis.annotations.Update("update orders set pay_status = 2 where id = #{id} and pay_status = 1")
+    int markRefunded(@Param("id") Long id);
+
+    /**
      * 根据动态条件统计营业额数据
      * @param map
      * @return

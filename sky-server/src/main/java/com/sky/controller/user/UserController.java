@@ -1,5 +1,6 @@
 package com.sky.controller.user;
 
+import com.sky.annotation.RateLimit;
 import com.sky.constant.JwtClaimsConstant;
 import com.sky.dto.UserLoginDTO;
 import com.sky.entity.User;
@@ -38,6 +39,8 @@ public class UserController {
      */
     @PostMapping("/login")
     @ApiOperation("微信登录")
+    // 免鉴权入口且每次都要调微信换取 openid，按来源 IP 节流，避免被刷爆外呼配额
+    @RateLimit(limit = 30, window = 60, key = "user-login")
     public Result<UserLoginVO> login(@RequestBody @Valid UserLoginDTO userLoginDTO){
         log.info("微信用户登录：{}",userLoginDTO.getCode());
 

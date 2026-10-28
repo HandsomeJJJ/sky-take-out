@@ -11,6 +11,7 @@ import com.sky.exception.ShoppingCartBusinessException;
 import com.sky.mapper.DishMapper;
 import com.sky.mapper.SetmealMapper;
 import com.sky.mapper.ShoppingCartMapper;
+import com.sky.service.ShopStatusService;
 import com.sky.service.ShoppingCartService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
@@ -29,13 +30,16 @@ public class ShoppingCartServiceImpl implements ShoppingCartService {
     private final ShoppingCartMapper shoppingCartMapper;
     private final DishMapper dishMapper;
     private final SetmealMapper setmealMapper;
+    private final ShopStatusService shopStatusService;
 
     public ShoppingCartServiceImpl(ShoppingCartMapper shoppingCartMapper,
                                    DishMapper dishMapper,
-                                   SetmealMapper setmealMapper) {
+                                   SetmealMapper setmealMapper,
+                                   ShopStatusService shopStatusService) {
         this.shoppingCartMapper = shoppingCartMapper;
         this.dishMapper = dishMapper;
         this.setmealMapper = setmealMapper;
+        this.shopStatusService = shopStatusService;
     }
 
     /**
@@ -46,6 +50,11 @@ public class ShoppingCartServiceImpl implements ShoppingCartService {
         if (shoppingCartDTO == null
                 || (shoppingCartDTO.getDishId() == null && shoppingCartDTO.getSetmealId() == null)) {
             throw new ShoppingCartBusinessException(MessageConstant.PARAM_ERROR);
+        }
+
+        // 打烊后不允许再加购：加进来的菜到下单才会被拒，用户会以为还能点
+        if (!shopStatusService.isOpen()) {
+            throw new ShoppingCartBusinessException(MessageConstant.SHOP_CLOSED);
         }
 
         ShoppingCart query = new ShoppingCart();

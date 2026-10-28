@@ -12,6 +12,8 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
 
 import java.util.Collections;
 
@@ -54,8 +56,26 @@ public class RateLimitAspect {
         if (StringUtils.isEmpty(prefix)) {
             prefix = ((MethodSignature) pjp.getSignature()).getMethod().getName();
         }
-        // 按用户维度限流；未登录则归入 anon
+        // 已登录按用户维度限流；未登录（登录接口本身）按客户端 IP 维度。
+        // 原来未登录全部归到一个 anon 桶：一个 NAT 出口能让所有真实用户一起被限，
+        // 而登录口共用一个桶也起不到"按来源节流爆破"的作用。
         Long userId = BaseContext.getCurrentId();
-        return "rate:limit:" + prefix + ":" + (userId == null ? "anon" : userId);
+        String principal = userId == null ? "ip:" + clientIp() : "uid:" + userId;
+        return "rate:limit:" + prefix + ":" + principal;
+    }
+
+    /**
+     * 取请求来源地址。只信 TCP 层的 remoteAddr：X-Forwarded-For 是客户端可自填的头，
+     * 拿它做限流维度等于把限流开关交给攻击者。前面确实挂了可信代理时，
+     * 应在代理层配置可信跳数后再改这里。
+     */
+    private String clientIp() {
+        ServletRequestAttributes attributes =
+                (ServletRequestAttributes) RequestContextHolder.getRequestAttributes();
+        if (attributes == null) {
+            return "unknown";
+        }
+        String remote = attributes.getRequest().getRemoteAddr();
+        return remote == null ? "unknown" : remote;
     }
 }

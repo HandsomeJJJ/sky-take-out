@@ -1,8 +1,10 @@
 package com.sky.task;
 
+import com.sky.entity.OrderNotification;
 import com.sky.entity.Orders;
 import com.sky.lock.RedisLock;
 import com.sky.mapper.OrderMapper;
+import com.sky.service.OrderNotificationService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -31,10 +33,13 @@ public class OrderTask {
 
     private final OrderMapper orderMapper;
     private final RedisLock redisLock;
+    private final OrderNotificationService notificationService;
 
-    public OrderTask(OrderMapper orderMapper, RedisLock redisLock) {
+    public OrderTask(OrderMapper orderMapper, RedisLock redisLock,
+                     OrderNotificationService notificationService) {
         this.orderMapper = orderMapper;
         this.redisLock = redisLock;
+        this.notificationService = notificationService;
     }
 
     /**
@@ -67,8 +72,14 @@ public class OrderTask {
         for (Orders orders : ordersList) {
             // 带前置状态的条件更新：全字段 update 会把用户在这期间改过的字段一起覆盖掉，
             // 而且和"用户点完成/商家派送"并发时会互相盖掉对方的状态
-            completed += orderMapper.completeByIdAndExpectedStatus(orders.getId(),
+            int rows = orderMapper.completeByIdAndExpectedStatus(orders.getId(),
                     Orders.DELIVERY_IN_PROGRESS, Orders.COMPLETED, LocalDateTime.now());
+            completed += rows;
+            if (rows == 1) {
+                notificationService.notify(orders.getUserId(), orders.getId(),
+                        OrderNotification.TYPE_COMPLETED, "订单已自动完成",
+                        "订单 " + orders.getNumber() + " 长时间停留在派送中，已自动标记完成。");
+            }
         }
         log.info("派送超时订单处理完成，扫描={}，实际完成={}", ordersList.size(), completed);
     }

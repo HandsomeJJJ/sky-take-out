@@ -15,7 +15,10 @@ import com.sky.exception.AccountNotFoundException;
 import com.sky.exception.BaseException;
 import com.sky.exception.PasswordErrorException;
 import com.sky.mapper.EmployeeMapper;
+import com.sky.properties.JwtProperties;
 import com.sky.result.PageResult;
+import com.sky.security.LoginAttemptGuard;
+import com.sky.security.TokenBlacklist;
 import com.sky.service.EmployeeService;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -32,6 +35,12 @@ public class EmployeeServiceImpl implements EmployeeService {
 
     @Autowired
     private EmployeeMapper employeeMapper;
+    @Autowired
+    private LoginAttemptGuard loginAttemptGuard;
+    @Autowired
+    private TokenBlacklist tokenBlacklist;
+    @Autowired
+    private JwtProperties jwtProperties;
 
     /**
      * 员工登录
@@ -43,18 +52,27 @@ public class EmployeeServiceImpl implements EmployeeService {
         String username = employeeLoginDTO.getUsername();
         String password = employeeLoginDTO.getPassword();
 
+        // 连续失败达到阈值后先拦掉，不给暴力破解留无限次尝试的机会
+        if (loginAttemptGuard.isLocked(username)) {
+            throw new AccountLockedException(MessageConstant.ACCOUNT_LOCKED);
+        }
+
         //1、根据用户名查询数据库中的数据
         Employee employee = employeeMapper.getByUsername(username);
 
         //2、处理各种异常情况（用户名不存在、密码不对、账号被锁定）
         if (employee == null) {
-            //账号不存在
+            //账号不存在。这里不计数：账号不存在也计的话，攻击者可以用"真实用户名+错密码"
+            //把别人的账号锁死，防破解的机制本身就成了攻击面。账号探测由接口级 IP 限流兜。
             throw new AccountNotFoundException(MessageConstant.ACCOUNT_NOT_FOUND);
         }
 
         //密码比对：库里存的是哈希，用哈希算法自带的 matches 比较，不做反向解密
         if (!PasswordHasher.matches(password, employee.getPassword())) {
             //密码错误
+            if (loginAttemptGuard.recordFailure(username)) {
+                throw new AccountLockedException(MessageConstant.ACCOUNT_LOCKED);
+            }
             throw new PasswordErrorException(MessageConstant.PASSWORD_ERROR);
         }
 
@@ -68,6 +86,9 @@ public class EmployeeServiceImpl implements EmployeeService {
             //账号被锁定
             throw new AccountLockedException(MessageConstant.ACCOUNT_LOCKED);
         }
+
+        // 登录成功清零计数，避免正常使用被累积到阈值
+        loginAttemptGuard.clear(username);
 
         //3、返回实体对象
         return employee;
@@ -129,11 +150,16 @@ public class EmployeeServiceImpl implements EmployeeService {
      * @param id
      */
     public void startOrStop(Integer status, Long id) {
-        // update employee set status = ? where id = ?
-
-        /*Employee employee = new Employee();
-        employee.setStatus(status);
-        employee.setId(id);*/
+        if (!StatusConstant.ENABLE.equals(status) && !StatusConstant.DISABLE.equals(status)) {
+            throw new BaseException("账号状态只能是 0（禁用）或 1（启用）");
+        }
+        if (id == null) {
+            throw new BaseException("缺少员工 id");
+        }
+        // 原来可以把自己禁用掉：点完之后当前会话立刻不可用，而系统里可能已经没有第二个能启用它的账号了
+        if (StatusConstant.DISABLE.equals(status) && id.equals(BaseContext.getCurrentId())) {
+            throw new BaseException(MessageConstant.CANNOT_DISABLE_SELF);
+        }
 
         Employee employee = Employee.builder()
                 .status(status)
@@ -141,6 +167,13 @@ public class EmployeeServiceImpl implements EmployeeService {
                 .build();
 
         employeeMapper.update(employee);
+
+        // 禁用要立刻掐掉对方已签发的令牌：JWT 在服务端删不掉，而这里拿不到对方的令牌原文，
+        // 所以按员工记一个"作废时间点"，早于它签发的令牌在拦截器里一律拒绝（不用等 TTL 到期）。
+        if (StatusConstant.DISABLE.equals(status)) {
+            tokenBlacklist.revokeEmployee(id, jwtProperties.getAdminTtl());
+            log.info("员工 {} 已禁用，其此前签发的令牌同时作废", id);
+        }
     }
 
     /**

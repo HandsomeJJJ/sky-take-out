@@ -1,7 +1,6 @@
 package com.sky.security;
 
 import lombok.extern.slf4j.Slf4j;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
@@ -24,6 +23,13 @@ public class TokenBlacklist {
 
     private static final String KEY_PREFIX = "jwt:revoked:";
 
+    /**
+     * 按"员工"维度的令牌作废时间戳。
+     * 禁用账号时服务端手里并没有那个人的令牌原文，单令牌黑名单无法覆盖，
+     * 因此记一个时间点：该时刻之前签发的令牌一律不再接受。
+     */
+    private static final String VALID_AFTER_PREFIX = "jwt:valid-after:emp:";
+
     private final StringRedisTemplate stringRedisTemplate;
 
     public TokenBlacklist(StringRedisTemplate stringRedisTemplate) {
@@ -40,6 +46,35 @@ public class TokenBlacklist {
             return;
         }
         stringRedisTemplate.opsForValue().set(key(token), "1", Duration.ofMillis(Math.max(ttlMillis, 1000)));
+    }
+
+    /**
+     * 让某位员工在 now 之前签发的所有令牌失效。
+     * 保留时长取令牌的最大存活时间：之后这些令牌本身已经过期，记录就没有存在价值了。
+     */
+    public void revokeEmployee(Long empId, long ttlMillis) {
+        if (empId == null) {
+            return;
+        }
+        stringRedisTemplate.opsForValue().set(VALID_AFTER_PREFIX + empId,
+                String.valueOf(System.currentTimeMillis()), Duration.ofMillis(Math.max(ttlMillis, 1000)));
+    }
+
+    /**
+     * 令牌是否早于该员工的作废时间点签发。Redis 异常时按"有效"处理，
+     * 与黑名单一致：这是登录态的增强校验，签名校验仍然照做，不能让一次抖动把全员踢下线。
+     */
+    public boolean isIssuedBeforeRevocation(Long empId, long issuedAtMillis) {
+        if (empId == null) {
+            return false;
+        }
+        try {
+            String validAfter = stringRedisTemplate.opsForValue().get(VALID_AFTER_PREFIX + empId);
+            return validAfter != null && Long.parseLong(validAfter) > issuedAtMillis;
+        } catch (Exception e) {
+            log.error("查询令牌作废时间点失败，本次按有效放行，请检查 Redis 可用性，empId={}", empId, e);
+            return false;
+        }
     }
 
     /**

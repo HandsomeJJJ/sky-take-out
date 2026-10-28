@@ -61,8 +61,17 @@ public class JwtTokenAdminInterceptor implements HandlerInterceptor {
                 response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
                 return false;
             }
+            // 禁用/登出之后旧令牌必须立刻失效：原来只校验黑名单，管理员把账号禁用后
+            // 对方手里的令牌还能用满 2 小时（TTL），这期间他仍能操作订单和员工。
+            Long employeeId = Long.valueOf(empId.toString());
+            if (claims.getIssuedAt() != null
+                    && tokenBlacklist.isIssuedBeforeRevocation(employeeId, claims.getIssuedAt().getTime())) {
+                log.warn("令牌在该账号被作废之前签发，拒绝访问，empId={}", employeeId);
+                response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+                return false;
+            }
             log.info("当前员工id：{}", empId);
-            BaseContext.setCurrentId(Long.valueOf(empId.toString()));
+            BaseContext.setCurrentId(employeeId);
             //3、通过，放行
             return true;
         } catch (Exception ex) {

@@ -1,9 +1,11 @@
 package com.sky.messaging.rabbitmq;
 
 import com.rabbitmq.client.Channel;
+import com.sky.entity.OrderNotification;
 import com.sky.event.OrderCreatedEvent;
 import com.sky.mapper.OrderMapper;
 import com.sky.messaging.MessageTrace;
+import com.sky.service.OrderNotificationService;
 import com.sky.utils.JsonUtils;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.support.AmqpHeaders;
@@ -27,9 +29,11 @@ import java.time.LocalDateTime;
 public class RabbitOrderTimeoutConsumer {
 
     private final OrderMapper orderMapper;
+    private final OrderNotificationService notificationService;
 
-    public RabbitOrderTimeoutConsumer(OrderMapper orderMapper) {
+    public RabbitOrderTimeoutConsumer(OrderMapper orderMapper, OrderNotificationService notificationService) {
         this.orderMapper = orderMapper;
+        this.notificationService = notificationService;
     }
 
     @RabbitListener(queues = RabbitMqConfiguration.CANCEL_QUEUE)
@@ -48,6 +52,12 @@ public class RabbitOrderTimeoutConsumer {
             int affectedRows = orderMapper.cancelPendingPaymentById(event.getOrderId(),
                     "订单超时，自动取消", LocalDateTime.now());
             log.info("订单超时检查完成，orderId={}, cancelled={}", event.getOrderId(), affectedRows == 1);
+            if (affectedRows == 1) {
+                // 用户的单被系统取消了也必须被告知，不然他只看到订单"莫名变成已取消"
+                notificationService.notify(event.getUserId(), event.getOrderId(),
+                        OrderNotification.TYPE_CANCELLED, "订单已超时取消",
+                        "订单 " + event.getOrderNumber() + " 超过 15 分钟未支付，已自动取消。");
+            }
 
             channel.basicAck(deliveryTag, false);
         } catch (Exception e) {

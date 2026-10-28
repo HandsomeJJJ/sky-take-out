@@ -3,6 +3,7 @@ package com.sky.service.impl;
 import com.github.pagehelper.Page;
 import com.github.pagehelper.PageHelper;
 import com.sky.constant.MessageConstant;
+import com.sky.constant.StatusConstant;
 import com.sky.context.BaseContext;
 import com.sky.dto.*;
 import com.sky.entity.*;
@@ -14,8 +15,12 @@ import com.sky.lock.RedisLock;
 import com.sky.mapper.*;
 import com.sky.messaging.MessagingSwitch;
 import com.sky.messaging.MqMessageSender;
+import com.sky.properties.OrderProperties;
 import com.sky.result.PageResult;
+import com.sky.service.OrderNotificationService;
+import com.sky.service.OrderRefundService;
 import com.sky.service.OrderService;
+import com.sky.service.ShopStatusService;
 import com.sky.utils.JsonUtils;
 import com.sky.utils.SnowflakeIdGenerator;
 import com.sky.utils.WeChatPayUtil;
@@ -44,6 +49,8 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 @Service
@@ -65,6 +72,10 @@ public class OrderServiceImpl implements OrderService {
     @Autowired
     private ShoppingCartMapper shoppingCartMapper;
     @Autowired
+    private DishMapper dishMapper;
+    @Autowired
+    private SetmealMapper setmealMapper;
+    @Autowired
     private UserMapper userMapper;
     @Autowired
     private WeChatPayUtil weChatPayUtil;
@@ -78,6 +89,14 @@ public class OrderServiceImpl implements OrderService {
     private MqMessageMapper mqMessageMapper;
     @Autowired
     private MessagingSwitch messagingSwitch;
+    @Autowired
+    private ShopStatusService shopStatusService;
+    @Autowired
+    private OrderRefundService orderRefundService;
+    @Autowired
+    private OrderNotificationService notificationService;
+    @Autowired
+    private OrderProperties orderProperties;
 
     /**
      * 用户下单
@@ -88,6 +107,13 @@ public class OrderServiceImpl implements OrderService {
     public OrderSubmitVO submitOrder(OrdersSubmitDTO ordersSubmitDTO) {
 
         Long userId = BaseContext.getCurrentId();
+
+        // 打烊拦截：营业状态原来只有 ShopController 读写，下单链路根本不参考，
+        // 设置成"打烊"后照样能收单，商家实际无法出餐。
+        if (!shopStatusService.isOpen()) {
+            throw new OrderBusinessException(MessageConstant.SHOP_CLOSED);
+        }
+
         String lockKey = "order:submit:lock:" + userId;
         // Redisson 锁：watchdog 自动续期，业务执行多久锁就持有多久，不会提前失效
         if (!redisLock.tryLock(lockKey, Duration.ofSeconds(1))) {
@@ -119,6 +145,10 @@ public class OrderServiceImpl implements OrderService {
             throw new ShoppingCartBusinessException(MessageConstant.SHOPPING_CART_IS_NULL);
         }
 
+        // 下单前复核：加购之后菜品可能已被停售或删除，购物车行里存的还是历史快照价，
+        // 必须按"当前是否在售 + 当前价格"重算，否则下架菜能成单、改价的差额由平台承担。
+        List<ResolvedItem> items = resolveCartItems(shoppingCartList);
+
         //2. 向订单表插入1条数据
         Orders orders = new Orders();
         orders.setNumber(String.valueOf(SnowflakeIdGenerator.getInstance().nextId()));
@@ -133,9 +163,11 @@ public class OrderServiceImpl implements OrderService {
         orders.setDeliveryStatus(ordersSubmitDTO.getDeliveryStatus());
         orders.setTablewareNumber(ordersSubmitDTO.getTablewareNumber());
         orders.setTablewareStatus(ordersSubmitDTO.getTablewareStatus());
-        orders.setPackAmount(ordersSubmitDTO.getPackAmount());
+        // 打包费同样由服务端按配置单价 × 份数计算，客户端没有填金额的入口
+        BigDecimal packAmount = calculatePackAmount(items);
+        orders.setPackAmount(packAmount);
         // 金额只由服务端计算，客户端没有可填写金额的入口
-        orders.setAmount(calculateOrderAmount(shoppingCartList, ordersSubmitDTO.getPackAmount()));
+        orders.setAmount(calculateOrderAmount(items, packAmount));
         orders.setAddress(addressBook.getDetail());
         orders.setPhone(addressBook.getPhone());
         orders.setConsignee(addressBook.getConsignee());
@@ -144,10 +176,17 @@ public class OrderServiceImpl implements OrderService {
 
         List<OrderDetail> orderDetailList = new ArrayList<>();
         //3. 向订单明细表插入n条数据
-        for (ShoppingCart cart : shoppingCartList) {
-            OrderDetail orderDetail = new OrderDetail();//订单明细
-            BeanUtils.copyProperties(cart, orderDetail);
+        for (ResolvedItem item : items) {
+            OrderDetail orderDetail = new OrderDetail();
+            // 明细的 id 不复用购物车行 id；名称/单价一律取复核后的当前值
             orderDetail.setOrderId(orders.getId());//设置当前订单明细关联的订单id
+            orderDetail.setName(item.name());
+            orderDetail.setImage(item.image());
+            orderDetail.setDishId(item.dishId());
+            orderDetail.setSetmealId(item.setmealId());
+            orderDetail.setDishFlavor(item.dishFlavor());
+            orderDetail.setNumber(item.number());
+            orderDetail.setAmount(item.price());
             orderDetailList.add(orderDetail);
         }
 
@@ -198,22 +237,103 @@ public class OrderServiceImpl implements OrderService {
     }
 
     /**
-     * 服务端算价：Σ(购物车单价 × 数量) + 打包费。
-     * 单价取购物车行里服务端写入的值，不接受请求参数里的金额。
+     * 下单前的一次复核：把购物车行换成"当前真实在售、当前价格"的明细。
+     * 只要有一行已经下架/被删除就整单拒绝，而不是静默少收一件商品。
      */
-    private BigDecimal calculateOrderAmount(List<ShoppingCart> items, Integer packAmount) {
-        BigDecimal total = BigDecimal.ZERO;
-        for (ShoppingCart item : items) {
-            if (item.getAmount() == null || item.getNumber() == null || item.getNumber() <= 0) {
-                log.error("购物车行数据异常，无法算价，item={}", item);
-                throw new OrderBusinessException(MessageConstant.SHOPPING_CART_IS_NULL);
+    private List<ResolvedItem> resolveCartItems(List<ShoppingCart> cartList) {
+        return resolveItems(cartList, true);
+    }
+
+    /**
+     * 按当前商品表复核每一行的在售状态与价格。
+     *
+     * @param strict true 时任何一行不可售都抛业务异常（下单）；
+     *               false 时跳过不可售的行（"再来一单"不该因为一个菜下架就整个按钮点不动）
+     */
+    private List<ResolvedItem> resolveItems(List<ShoppingCart> cartList, boolean strict) {
+        List<Long> dishIds = cartList.stream().map(ShoppingCart::getDishId)
+                .filter(Objects::nonNull).distinct().collect(Collectors.toList());
+        List<Long> setmealIds = cartList.stream().map(ShoppingCart::getSetmealId)
+                .filter(Objects::nonNull).distinct().collect(Collectors.toList());
+
+        Map<Long, Dish> dishMap = dishIds.isEmpty() ? Collections.emptyMap()
+                : dishMapper.getByIds(dishIds).stream().collect(Collectors.toMap(Dish::getId, Function.identity()));
+        Map<Long, Setmeal> setmealMap = setmealIds.isEmpty() ? Collections.emptyMap()
+                : setmealMapper.getByIds(setmealIds).stream()
+                .collect(Collectors.toMap(Setmeal::getId, Function.identity()));
+
+        List<String> unavailable = new ArrayList<>();
+        List<ResolvedItem> items = new ArrayList<>();
+        for (ShoppingCart cart : cartList) {
+            if (cart.getDishId() != null) {
+                Dish dish = dishMap.get(cart.getDishId());
+                if (dish == null || !StatusConstant.ENABLE.equals(dish.getStatus()) || dish.getPrice() == null) {
+                    unavailable.add(cart.getName() == null ? "菜品" + cart.getDishId() : cart.getName());
+                    continue;
+                }
+                items.add(new ResolvedItem(dish.getId(), null, dish.getName(), dish.getImage(),
+                        cart.getDishFlavor(), cart.getNumber(), dish.getPrice()));
+            } else if (cart.getSetmealId() != null) {
+                Setmeal setmeal = setmealMap.get(cart.getSetmealId());
+                if (setmeal == null || !StatusConstant.ENABLE.equals(setmeal.getStatus()) || setmeal.getPrice() == null) {
+                    unavailable.add(cart.getName() == null ? "套餐" + cart.getSetmealId() : cart.getName());
+                    continue;
+                }
+                items.add(new ResolvedItem(null, setmeal.getId(), setmeal.getName(), setmeal.getImage(),
+                        null, cart.getNumber(), setmeal.getPrice()));
+            } else {
+                unavailable.add(cart.getName() == null ? "未知商品" : cart.getName());
             }
-            total = total.add(item.getAmount().multiply(BigDecimal.valueOf(item.getNumber())));
         }
-        if (packAmount != null) {
-            total = total.add(BigDecimal.valueOf(packAmount));
+
+        if (!unavailable.isEmpty() && strict) {
+            log.warn("下单被拒：有 {} 项商品已下架或删除，userId={}，商品={}",
+                    unavailable.size(), BaseContext.getCurrentId(), unavailable);
+            throw new OrderBusinessException(MessageConstant.ORDER_ITEM_OFF_SALE + "：" + String.join("、", unavailable));
         }
-        return total.setScale(2, RoundingMode.HALF_UP);
+        if (!unavailable.isEmpty()) {
+            log.info("已跳过下架商品，userId={}，商品={}", BaseContext.getCurrentId(), unavailable);
+        }
+        if (items.isEmpty()) {
+            if (strict) {
+                throw new ShoppingCartBusinessException(MessageConstant.SHOPPING_CART_IS_NULL);
+            }
+            throw new OrderBusinessException(MessageConstant.ORDER_ITEM_OFF_SALE);
+        }
+        return items;
+    }
+
+    /**
+     * 打包费 = 配置的单份打包费 × 总份数，并设上限。
+     * 原来这个数由客户端填（0~100 随便写），而订单总额又照单全收，等于用户自己决定给多少打包费，
+     * 与"金额只由服务端计算"的口径直接冲突，所以改成服务端按规则算。
+     */
+    private BigDecimal calculatePackAmount(List<ResolvedItem> items) {
+        int portions = items.stream().mapToInt(ResolvedItem::number).sum();
+        BigDecimal fee = orderProperties.getPackFeePerItem()
+                .multiply(BigDecimal.valueOf(Math.max(portions, 0)))
+                .setScale(2, RoundingMode.HALF_UP);
+        BigDecimal max = orderProperties.getPackFeeMax();
+        return fee.compareTo(max) > 0 ? max : fee;
+    }
+
+    /**
+     * 服务端算价：Σ(当前单价 × 数量) + 打包费。
+     * 单价取数据库里的现价，不用购物车行的历史快照；不接受任何请求参数里的金额。
+     */
+    private BigDecimal calculateOrderAmount(List<ResolvedItem> items, BigDecimal packAmount) {
+        BigDecimal total = BigDecimal.ZERO;
+        for (ResolvedItem item : items) {
+            total = total.add(item.price().multiply(BigDecimal.valueOf(item.number())));
+        }
+        return total.add(packAmount).setScale(2, RoundingMode.HALF_UP);
+    }
+
+    /**
+     * 复核过的一行商品：归属 id、名称/图片与单价都来自当前数据库，数量来自购物车。
+     */
+    private record ResolvedItem(Long dishId, Long setmealId, String name, String image,
+                                String dishFlavor, Integer number, BigDecimal price) {
     }
 
     /**
@@ -233,6 +353,11 @@ public class OrderServiceImpl implements OrderService {
             throw new OrderBusinessException(MessageConstant.ORDER_NOT_FOUND);
         }
         if (!Orders.UN_PAID.equals(ordersDB.getPayStatus())) {
+            throw new OrderBusinessException(MessageConstant.ORDER_STATUS_ERROR);
+        }
+        // 只有"待付款"的订单可以发起支付：超时取消的单 pay_status 仍然是 0，
+        // 不判 status 就会让用户对一张已经不存在的订单付钱。
+        if (!Orders.PENDING_PAYMENT.equals(ordersDB.getStatus())) {
             throw new OrderBusinessException(MessageConstant.ORDER_STATUS_ERROR);
         }
 
@@ -289,11 +414,10 @@ public class OrderServiceImpl implements OrderService {
             throw new OrderBusinessException(MessageConstant.PAY_AMOUNT_MISMATCH);
         }
 
-        // 条件更新（where pay_status = 0）：微信重复推送时只有一个请求能改成功，天然幂等
+        // 条件更新（where pay_status = 0 and status = 1）：微信重复推送时只有一个请求能改成功，天然幂等
         int rows = orderMapper.markPaidByNumber(outTradeNo, LocalDateTime.now());
         if (rows != 1) {
-            // 已入账的重复回调属正常；订单已被取消却收到支付，需要走退款，这里只留痕
-            log.warn("支付回调未改动订单（重复回调或订单已不可支付），outTradeNo={}", outTradeNo);
+            handleUnmatchedPaidNotify(ordersDB);
             return;
         }
 
@@ -304,6 +428,31 @@ public class OrderServiceImpl implements OrderService {
         message.put("content", "订单号：" + outTradeNo);
 
         webSocketMessagePublisher.broadcast(JsonUtils.toJson(message));
+
+        notificationService.notifyOrder(ordersDB, OrderNotification.TYPE_PAID,
+                "支付成功", "订单 " + outTradeNo + " 已支付成功，等待商家接单。");
+    }
+
+    /**
+     * 收到了成功支付回调但没有推进订单，两种可能：
+     * 1. 重复回调 —— 订单已经是已支付/已退款，直接确认，不做二次入账；
+     * 2. 迟到支付 —— 订单在用户支付过程中被超时任务取消（status=6、pay_status=0），
+     *    钱确实进来了。原来这里只打一行 warn，等于收了钱既不承认也不退，是资损方向。
+     *    现在把支付状态留痕并自动发起全额退款，退款本身失败会进补偿队列。
+     */
+    private void handleUnmatchedPaidNotify(Orders ordersDB) {
+        if (Orders.CANCELLED.equals(ordersDB.getStatus()) && Orders.UN_PAID.equals(ordersDB.getPayStatus())) {
+            int marked = orderMapper.markLatePayment(ordersDB.getNumber(), LocalDateTime.now());
+            if (marked == 1) {
+                log.warn("订单已取消但收到支付成功回调，已登记支付并发起自动退款。orderNumber={}", ordersDB.getNumber());
+                orderRefundService.applyRefund(ordersDB, "订单已取消，迟到支付自动退款");
+                notificationService.notifyOrder(ordersDB, OrderNotification.TYPE_REFUND,
+                        "订单已取消，正在退款", "订单 " + ordersDB.getNumber() + " 在取消后完成了支付，系统将全额退回。");
+                return;
+            }
+        }
+        log.warn("支付回调未改动订单（重复回调或订单状态已变更），orderNumber={}, status={}, payStatus={}",
+                ordersDB.getNumber(), ordersDB.getStatus(), ordersDB.getPayStatus());
     }
 
     /**
@@ -422,32 +571,30 @@ public class OrderServiceImpl implements OrderService {
 
         // 先落库再退款：状态确定下来之后才动钱，避免"退款成功但订单没取消"的资损方向
         if (needRefund) {
+            notificationService.notifyOrder(ordersDB, OrderNotification.TYPE_REFUND,
+                    "订单已取消，退款处理中", "订单 " + ordersDB.getNumber() + " 已取消，退款将原路退回。");
             refundAfterCancelled(ordersDB);
+        } else {
+            notificationService.notifyOrder(ordersDB, OrderNotification.TYPE_CANCELLED,
+                    "订单已取消", "订单 " + ordersDB.getNumber() + " 已取消。");
         }
     }
 
     /**
      * 订单已取消之后发起退款。退款调用失败不能回滚订单状态（钱可以补，重复取消会造成二次退款），
-     * 因此这里只告警，交由人工或对账补偿。
+     * 因此这里不抛出异常，但必须留下可补偿的记录：退款单号由订单号派生并建唯一索引，
+     * 失败进入待重试状态，由 RefundCompensator 按退避重投，达到上限才转人工。
      */
     private void refundAfterCancelled(Orders ordersDB) {
-        try {
-            String refund = weChatPayUtil.refund(
-                    ordersDB.getNumber(), //商户订单号
-                    ordersDB.getNumber(), //商户退款单号
-                    ordersDB.getAmount(), //退款金额，单位 元
-                    ordersDB.getAmount());//原订单金额
-            log.info("订单 {} 退款申请完成：{}", ordersDB.getNumber(), refund);
-        } catch (Exception e) {
-            log.error("订单已取消但退款失败，需要人工补偿。orderNumber={}, amount={}",
-                    ordersDB.getNumber(), ordersDB.getAmount(), e);
-        }
+        orderRefundService.applyRefund(ordersDB, "订单取消退款");
     }
 
     /**
-     * 再来一单
-     *
-     * @param id
+     * 再来一单。
+     * <p>
+     * 原来是把订单明细原样复制进购物车：已下架的菜也能搬进来（要到下单才报错）、
+     * 沿用成交时的历史价格（商家改价后按旧价加购）、不与购物车里已有的同款合并、
+     * 也不受单行 99 份上限约束。现在一律按当前在售状态与现价重建，并做合并与封顶。
      */
     public void repetition(Long id) {
         // 查询当前用户id
@@ -460,25 +607,82 @@ public class OrderServiceImpl implements OrderService {
 
         // 根据订单id查询当前订单详情
         List<OrderDetail> orderDetailList = orderDetailMapper.getByOrderId(id);
-
-        // 将订单详情对象转换为购物车对象
-        List<ShoppingCart> shoppingCartList = orderDetailList.stream().map(x -> {
-            ShoppingCart shoppingCart = new ShoppingCart();
-
-            // 将原订单详情里面的菜品信息重新复制到购物车对象中
-            BeanUtils.copyProperties(x, shoppingCart, "id");
-            shoppingCart.setUserId(userId);
-            shoppingCart.setCreateTime(LocalDateTime.now());
-
-            return shoppingCart;
-        }).collect(Collectors.toList());
-
-        if (shoppingCartList.isEmpty()) {
+        if (CollectionUtils.isEmpty(orderDetailList)) {
             return;
         }
 
-        // 将订单明细批量加入购物车，一次批量插入
-        shoppingCartMapper.insertBatch(shoppingCartList);
+        // 明细先转成购物车形状，复用同一套"在售 + 现价"复核；不可售的跳过而不是一律拒绝
+        List<ShoppingCart> asCartRows = orderDetailList.stream().map(detail -> {
+            ShoppingCart row = new ShoppingCart();
+            row.setName(detail.getName());
+            row.setImage(detail.getImage());
+            row.setDishId(detail.getDishId());
+            row.setSetmealId(detail.getSetmealId());
+            row.setDishFlavor(detail.getDishFlavor());
+            row.setNumber(detail.getNumber() == null || detail.getNumber() < 1 ? 1 : detail.getNumber());
+            return row;
+        }).collect(Collectors.toList());
+        List<ResolvedItem> items = resolveItems(asCartRows, false);
+
+        int maxNumber = orderProperties.getMaxNumberPerItem();
+
+        // 一次查出当前购物车，按 SKU 建索引，避免逐条查询
+        ShoppingCart query = new ShoppingCart();
+        query.setUserId(userId);
+        Map<String, ShoppingCart> existingBySku = new HashMap<>();
+        for (ShoppingCart row : shoppingCartMapper.list(query)) {
+            existingBySku.putIfAbsent(skuKey(row.getDishId(), row.getSetmealId(), row.getDishFlavor()), row);
+        }
+
+        // 新增行先在内存里按 SKU 合并：同一个 SKU 两条一起批量插入会撞购物车的唯一索引
+        Map<String, ShoppingCart> pendingInsert = new LinkedHashMap<>();
+        for (ResolvedItem item : items) {
+            String key = skuKey(item.dishId(), item.setmealId(), item.dishFlavor());
+            ShoppingCart existing = existingBySku.get(key);
+            if (existing != null) {
+                // 数量累加与上限判断都交给 SQL，返回 0 说明加不完，直接封顶到上限
+                int rows = shoppingCartMapper.increaseNumberByDelta(existing.getId(),
+                        item.number(), maxNumber);
+                if (rows != 1) {
+                    shoppingCartMapper.capNumberById(existing.getId(), maxNumber);
+                    log.info("购物车商品 {} 数量已达上限 {}，按上限封顶", item.name(), maxNumber);
+                }
+                continue;
+            }
+            ShoppingCart pending = pendingInsert.get(key);
+            if (pending != null) {
+                pending.setNumber(Math.min(pending.getNumber() + item.number(), maxNumber));
+                continue;
+            }
+            LocalDateTime now = LocalDateTime.now();
+            pendingInsert.put(key, ShoppingCart.builder()
+                    .name(item.name())
+                    .image(item.image())
+                    .dishId(item.dishId())
+                    .setmealId(item.setmealId())
+                    .dishFlavor(item.dishFlavor())
+                    .number(Math.min(item.number(), maxNumber))
+                    // 价格取复核后的现价，不是订单快照价
+                    .amount(item.price())
+                    .userId(userId)
+                    .createTime(now)
+                    .build());
+        }
+
+        if (!pendingInsert.isEmpty()) {
+            shoppingCartMapper.insertBatch(new ArrayList<>(pendingInsert.values()));
+        }
+    }
+
+    /**
+     * 购物车里"同一个商品"的判定口径：菜品按 dishId + 口味，套餐按 setmealId。
+     * 与 shopping_cart 的唯一索引（item_key 生成列）保持一致。
+     */
+    private static String skuKey(Long dishId, Long setmealId, String dishFlavor) {
+        if (dishId != null) {
+            return "D" + dishId + ":" + (dishFlavor == null ? "" : dishFlavor);
+        }
+        return "S" + setmealId + ":";
     }
 
     /**
@@ -574,6 +778,20 @@ public class OrderServiceImpl implements OrderService {
         if (rows != 1) {
             throw new OrderBusinessException(MessageConstant.ORDER_STATUS_ERROR);
         }
+        notifyAfterTransition(ordersConfirmDTO.getId(), OrderNotification.TYPE_CONFIRMED,
+                "商家已接单", "商家已接单，正在备餐。");
+    }
+
+    /**
+     * 状态推进成功后给用户留一条站内通知。
+     * 原来只有支付和催单走 WebSocket 广播，接单/拒单/派送/完成对用户是静默发生的；
+     * 而 WebSocket 连接（sid）没有和用户绑定，也无法定向推送。
+     */
+    private void notifyAfterTransition(Long orderId, int type, String title, String content) {
+        Orders order = orderMapper.getById(orderId);
+        if (order != null) {
+            notificationService.notifyOrder(order, type, title, content);
+        }
     }
 
     /**
@@ -601,7 +819,13 @@ public class OrderServiceImpl implements OrderService {
         }
 
         if (needRefund) {
+            notificationService.notifyOrder(ordersDB, OrderNotification.TYPE_REJECTED,
+                    "商家已拒单", "商家取消了订单：" + nullToEmpty(ordersRejectionDTO.getRejectionReason())
+                            + "，退款将原路退回。");
             refundAfterCancelled(ordersDB);
+        } else {
+            notificationService.notifyOrder(ordersDB, OrderNotification.TYPE_REJECTED,
+                    "商家已拒单", "商家取消了订单：" + nullToEmpty(ordersRejectionDTO.getRejectionReason()));
         }
     }
 
@@ -633,8 +857,18 @@ public class OrderServiceImpl implements OrderService {
         }
 
         if (needRefund) {
+            notificationService.notifyOrder(ordersDB, OrderNotification.TYPE_CANCELLED,
+                    "订单已取消", "订单已取消：" + nullToEmpty(ordersCancelDTO.getCancelReason())
+                            + "，退款将原路退回。");
             refundAfterCancelled(ordersDB);
+        } else {
+            notificationService.notifyOrder(ordersDB, OrderNotification.TYPE_CANCELLED,
+                    "订单已取消", "订单已取消：" + nullToEmpty(ordersCancelDTO.getCancelReason()));
         }
+    }
+
+    private static String nullToEmpty(String value) {
+        return value == null ? "" : value;
     }
 
     /**
@@ -647,6 +881,7 @@ public class OrderServiceImpl implements OrderService {
         if (rows != 1) {
             throw new OrderBusinessException(MessageConstant.ORDER_STATUS_ERROR);
         }
+        notifyAfterTransition(id, OrderNotification.TYPE_DELIVERING, "订单已送出", "订单已发货，正在派送中。");
     }
 
     /**
@@ -660,6 +895,7 @@ public class OrderServiceImpl implements OrderService {
         if (rows != 1) {
             throw new OrderBusinessException(MessageConstant.ORDER_STATUS_ERROR);
         }
+        notifyAfterTransition(id, OrderNotification.TYPE_COMPLETED, "订单已完成", "订单已送达，感谢你的光临。");
     }
 
     /**

@@ -41,10 +41,6 @@ public class OrdersSubmitDTO implements Serializable {
     @Max(value = 1, message = "餐具数量状态只能是 0具体数量 1按餐量提供")
     //餐具数量状态  1按餐量提供  0选择具体数量
     private Integer tablewareStatus;
-    @NotNull(message = "打包费不能为空")
-    @Min(value = 0, message = "打包费不能为负")
-    @Max(value = 100, message = "打包费超出上限")
-    //打包费
-    private Integer packAmount;
-    // 订单金额没有入参字段：金额只能由服务端按购物车明细计算
+    // 订单金额、打包费都没有入参字段：这两项只能由服务端按购物车明细与配置规则计算，
+    // 客户端能填钱就等于能改价。
 }

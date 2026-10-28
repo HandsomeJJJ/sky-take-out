@@ -15,6 +15,7 @@ import com.sky.mapper.DishFlavorMapper;
 import com.sky.mapper.DishMapper;
 import com.sky.mapper.SetmealDishMapper;
 import com.sky.mapper.SetmealMapper;
+import com.sky.mapper.ShoppingCartMapper;
 import com.sky.result.PageResult;
 import com.sky.service.DishService;
 import com.sky.vo.DishVO;
@@ -39,6 +40,8 @@ public class DishServiceImpl implements DishService {
     private SetmealDishMapper setmealDishMapper;
     @Autowired
     private SetmealMapper setmealMapper;
+    @Autowired
+    private ShoppingCartMapper shoppingCartMapper;
 
     /**
      * 新增菜品和对应的口味
@@ -111,6 +114,13 @@ public class DishServiceImpl implements DishService {
             dishMapper.deleteById(id);
             //删除菜品关联的口味数据
             dishFlavorMapper.deleteByDishId(id);
+        }
+
+        // 菜已经删了，购物车里指向它的行就成了悬空引用：不清的话用户下单会被"已下架"整单拒绝，
+        // 而他在购物车里既看不到原因也删不掉。放在同一个事务里，避免出现"菜删了车没清"。
+        int cleaned = shoppingCartMapper.deleteByDishIds(ids);
+        if (cleaned > 0) {
+            log.info("删除菜品后清理购物车行 {} 条", cleaned);
         }
     }
 

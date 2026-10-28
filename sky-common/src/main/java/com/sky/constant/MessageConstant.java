@@ -26,5 +26,8 @@ public class MessageConstant {
     public static final String ORDER_NOT_FOUND = "订单不存在";
     public static final String PARAM_ERROR = "请求参数不完整";
     public static final String PAY_AMOUNT_MISMATCH = "支付金额与订单金额不一致";
+    public static final String SHOP_CLOSED = "门店已打烊，暂不接单";
+    public static final String ORDER_ITEM_OFF_SALE = "部分商品已下架或已售罄，请重新选择";
+    public static final String CANNOT_DISABLE_SELF = "不能禁用当前登录的账号";
 
 }

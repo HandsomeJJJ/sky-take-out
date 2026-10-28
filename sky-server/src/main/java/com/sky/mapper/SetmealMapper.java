@@ -9,6 +9,7 @@ import com.sky.vo.DishItemVO;
 import com.sky.vo.SetmealVO;
 import org.apache.ibatis.annotations.Delete;
 import org.apache.ibatis.annotations.Mapper;
+import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 
 import java.util.List;
@@ -94,4 +95,12 @@ public interface SetmealMapper {
      * @return
      */
     Integer countByMap(Map map);
+
+    /**
+     * 按 id 批量查询套餐，供下单前复核在售状态与当前价格使用。
+     */
+    @Select("<script>select * from setmeal where id in " +
+            "<foreach collection=\"ids\" item=\"id\" open=\"(\" separator=\",\" close=\")\">#{id}</foreach>" +
+            "</script>")
+    List<Setmeal> getByIds(@Param("ids") List<Long> ids);
 }

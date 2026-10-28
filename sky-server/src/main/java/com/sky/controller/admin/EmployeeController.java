@@ -1,5 +1,6 @@
 package com.sky.controller.admin;
 
+import com.sky.annotation.RateLimit;
 import com.sky.constant.JwtClaimsConstant;
 import com.sky.dto.EmployeeDTO;
 import com.sky.dto.EmployeeLoginDTO;
@@ -47,6 +48,9 @@ public class EmployeeController {
      */
     @PostMapping("/login")
     @ApiOperation(value = "员工登录")
+    // 登录接口是免鉴权入口，原来只有下单/催单有限流，等于爆破密码没有任何成本：
+    // 未登录时按客户端 IP 限流，配合服务端的账号失败计数锁定一起用。
+    @RateLimit(limit = 10, window = 60, key = "admin-login")
     public Result<EmployeeLoginVO> login(@RequestBody @Valid EmployeeLoginDTO employeeLoginDTO) {
         log.info("员工登录，用户名：{}", employeeLoginDTO.getUsername());
 

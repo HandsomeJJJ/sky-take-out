@@ -8,6 +8,7 @@ import com.sky.enumeration.OperationType;
 import com.sky.vo.DishVO;
 import org.apache.ibatis.annotations.Delete;
 import org.apache.ibatis.annotations.Mapper;
+import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 
 import java.util.List;
@@ -88,4 +89,13 @@ public interface DishMapper {
      * @return
      */
     Integer countByMap(Map map);
+
+    /**
+     * 按 id 批量查询菜品。下单前要复核"是否仍在售"并取当前价格，
+     * 用一次 in 查询而不是在循环里逐个查（N+1）。
+     */
+    @Select("<script>select * from dish where id in " +
+            "<foreach collection=\"ids\" item=\"id\" open=\"(\" separator=\",\" close=\")\">#{id}</foreach>" +
+            "</script>")
+    List<Dish> getByIds(@Param("ids") List<Long> ids);
 }

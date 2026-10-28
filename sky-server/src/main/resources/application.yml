@@ -140,6 +140,11 @@ sky:
   snowflake:
     # 集群必须给每个实例下发不同值，否则同一毫秒会生成相同订单号
     worker-id: ${SNOWFLAKE_WORKER_ID:1}
+  order:
+    # 打包费与份数上限都由服务端持有：客户端能填金额就等于能改价
+    pack-fee-per-item: ${PACK_FEE_PER_ITEM:1.00}
+    pack-fee-max: ${PACK_FEE_MAX:20.00}
+    max-number-per-item: ${MAX_NUMBER_PER_ITEM:99}
   shop:
     address: 北京市海淀区上地十街10号
   baidu:

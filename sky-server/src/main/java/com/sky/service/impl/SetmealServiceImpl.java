@@ -14,6 +14,7 @@ import com.sky.exception.SetmealEnableFailedException;
 import com.sky.mapper.DishMapper;
 import com.sky.mapper.SetmealDishMapper;
 import com.sky.mapper.SetmealMapper;
+import com.sky.mapper.ShoppingCartMapper;
 import com.sky.result.PageResult;
 import com.sky.service.SetmealService;
 import com.sky.vo.DishItemVO;
@@ -39,6 +40,8 @@ public class SetmealServiceImpl implements SetmealService {
     private SetmealDishMapper setmealDishMapper;
     @Autowired
     private DishMapper dishMapper;
+    @Autowired
+    private ShoppingCartMapper shoppingCartMapper;
 
     /**
      * 新增套餐，同时需要保存套餐和菜品的关联关系
@@ -89,7 +92,11 @@ public class SetmealServiceImpl implements SetmealService {
     public void deleteBatch(List<Long> ids) {
         ids.forEach(id -> {
             Setmeal setmeal = setmealMapper.getById(id);
-            if (StatusConstant.ENABLE == setmeal.getStatus()) {
+            if (setmeal == null) {
+                throw new DeletionNotAllowedException("套餐不存在");
+            }
+            // 用 equals 比较：两个 Integer 用 == 比的是引用，只在小数值缓存范围内"碰巧对"
+            if (StatusConstant.ENABLE.equals(setmeal.getStatus())) {
                 //起售中的套餐不能删除
                 throw new DeletionNotAllowedException(MessageConstant.SETMEAL_ON_SALE);
             }
@@ -101,6 +108,12 @@ public class SetmealServiceImpl implements SetmealService {
             //删除套餐菜品关系表中的数据
             setmealDishMapper.deleteBySetmealId(setmealId);
         });
+
+        // 套餐删掉后购物车里的引用会悬空，下单会被整单拒绝且用户删不掉，同事务一并清理
+        int cleaned = shoppingCartMapper.deleteBySetmealIds(ids);
+        if (cleaned > 0) {
+            log.info("删除套餐后清理购物车行 {} 条", cleaned);
+        }
     }
 
     /**

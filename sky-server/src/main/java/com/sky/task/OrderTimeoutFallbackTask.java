@@ -1,8 +1,10 @@
 package com.sky.task;
 
+import com.sky.entity.OrderNotification;
 import com.sky.entity.Orders;
 import com.sky.lock.RedisLock;
 import com.sky.mapper.OrderMapper;
+import com.sky.service.OrderNotificationService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -28,10 +30,13 @@ public class OrderTimeoutFallbackTask {
 
     private final OrderMapper orderMapper;
     private final RedisLock redisLock;
+    private final OrderNotificationService notificationService;
 
-    public OrderTimeoutFallbackTask(OrderMapper orderMapper, RedisLock redisLock) {
+    public OrderTimeoutFallbackTask(OrderMapper orderMapper, RedisLock redisLock,
+                                    OrderNotificationService notificationService) {
         this.orderMapper = orderMapper;
         this.redisLock = redisLock;
+        this.notificationService = notificationService;
     }
 
     /**
@@ -55,8 +60,14 @@ public class OrderTimeoutFallbackTask {
             int cancelled = 0;
             for (Orders orders : ordersList) {
                 // 只取消仍然是"待支付"的订单：刚支付的订单不能被兜底任务判成超时
-                cancelled += orderMapper.cancelPendingPaymentById(orders.getId(),
+                int rows = orderMapper.cancelPendingPaymentById(orders.getId(),
                         "订单超时，自动取消", LocalDateTime.now());
+                cancelled += rows;
+                if (rows == 1) {
+                    notificationService.notify(orders.getUserId(), orders.getId(),
+                            OrderNotification.TYPE_CANCELLED, "订单已超时取消",
+                            "订单 " + orders.getNumber() + " 超过 " + TIMEOUT_MINUTES + " 分钟未支付，已自动取消。");
+                }
             }
             log.info("超时订单兜底完成，扫描={}，实际取消={}", ordersList.size(), cancelled);
         } finally {
