@@ -18,6 +18,8 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "com.github.xiaoymin:knife4j-spring-boot-starter"
         update-types: ["version-update:semver-major"]
+      - dependency-name: "org.redisson:redisson-spring-boot-starter"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
