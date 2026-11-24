@@ -4,7 +4,8 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
-    open-pull-requests-limit: 10
+    # 暂时只保留 main，暂停自动版本 PR；恢复时把 0 改回 10 即可。
+    open-pull-requests-limit: 0
     ignore:
       # 以下三个包的下一个主版本都需要 Jakarta / Spring Boot 4 迁移，
       # 先锁在当前的 javax / Boot 2.7 线上，避免每周重复生成不兼容 PR。
@@ -24,3 +25,4 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    open-pull-requests-limit: 0
