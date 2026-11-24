@@ -19,8 +19,8 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "com.github.xiaoymin:knife4j-spring-boot-starter"
         update-types: ["version-update:semver-major"]
+      # Redisson 3.18+ 已切到 Spring Boot 3 / Spring Data 3，2.7 线只能停在 3.17.7。
       - dependency-name: "org.redisson:redisson-spring-boot-starter"
-        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
