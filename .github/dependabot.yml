@@ -5,6 +5,15 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
+    ignore:
+      # 以下三个包的下一个主版本都需要 Jakarta / Spring Boot 4 迁移，
+      # 先锁在当前的 javax / Boot 2.7 线上，避免每周重复生成不兼容 PR。
+      - dependency-name: "org.springframework.boot:spring-boot-starter-parent"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "com.github.pagehelper:pagehelper-spring-boot-starter"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "org.glassfish.jaxb:jaxb-runtime"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
